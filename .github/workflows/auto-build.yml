@@ -1,4 +1,4 @@
-name: Auto Build QQ Farm Bot UI - Simplified with Latest
+name: Auto Build QQ Farm Bot UI - Fixed Version Reading
 
 on:
   schedule:
@@ -43,36 +43,58 @@ jobs:
         git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         git fetch upstream --depth=1
 
-    - name: Get version from Update.log
+    - name: Get version from Update.log (Fixed)
       id: version
       run: |
+        echo "=== 从 Update.log 读取版本号 ==="
+
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
         if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
-          UPDATE_LOG_CONTENT=$(curl -s "$UPDATE_LOG_URL")
+          echo "✅ Update.log 文件存在"
+
+          # 读取第一行
+          FIRST_LINE=$(curl -s "$UPDATE_LOG_URL" | head -1)
+          echo "Update.log 第一行: $FIRST_LINE"
+
+          # 针对您的格式提取版本号
+          # 格式：2026-03-02 一次更新 前端：v2.0.3 后端：v2.0.3
 
           # 提取后端版本（优先）
-          BACKEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-          FRONTEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          BACKEND_VERSION=$(echo "$FIRST_LINE" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
 
+          # 提取前端版本
+          FRONTEND_VERSION=$(echo "$FIRST_LINE" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+
+          # 选择版本号
           if [ -n "$BACKEND_VERSION" ]; then
             VERSION="$BACKEND_VERSION"
+            echo "✅ 使用后端版本: $VERSION"
           elif [ -n "$FRONTEND_VERSION" ]; then
             VERSION="$FRONTEND_VERSION"
+            echo "✅ 使用前端版本: $VERSION"
           else
+            echo "❌ 未找到版本号，使用 Git 哈希"
             VERSION=$(git rev-parse upstream/main | cut -c1-8)
+            echo "使用 Git 哈希: $VERSION"
           fi
         else
+          echo "❌ 无法访问 Update.log"
           VERSION=$(git rev-parse upstream/main | cut -c1-8)
+          echo "使用 Git 哈希: $VERSION"
         fi
 
-        # 生成带日期的版本号
+        # 生成完整版本号
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
 
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
         echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+        echo ""
+        echo "=== 最终结果 ==="
+        echo "基础版本: $VERSION"
+        echo "完整版本: $FULL_VERSION"
 
     - name: Check for updates
       id: check
