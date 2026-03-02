@@ -1,4 +1,4 @@
-name: Auto Build QQ Farm Bot UI with Version Management
+name: Auto Build QQ Farm Bot UI - Simplified with Latest
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force_build:
-        description: '强制构建（即使没有更新）'
+        description: '强制构建'
         required: false
         default: 'false'
         type: choice
@@ -21,16 +21,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
-    - name: Checkout your repo
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 修复：移除 install: true 参数
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
@@ -48,92 +46,45 @@ jobs:
     - name: Get version from Update.log
       id: version
       run: |
-        echo "=== 从 Update.log 读取版本号 ==="
-
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
         if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
-          echo "获取 Update.log 内容..."
           UPDATE_LOG_CONTENT=$(curl -s "$UPDATE_LOG_URL")
 
+          # 提取后端版本（优先）
           BACKEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
           FRONTEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
 
-          echo "前端版本: $FRONTEND_VERSION"
-          echo "后端版本: $BACKEND_VERSION"
-
           if [ -n "$BACKEND_VERSION" ]; then
             VERSION="$BACKEND_VERSION"
-            VERSION_SOURCE="upstream_update_log_backend"
           elif [ -n "$FRONTEND_VERSION" ]; then
             VERSION="$FRONTEND_VERSION"
-            VERSION_SOURCE="upstream_update_log_frontend"
           else
-            echo "未从 Update.log 找到版本号"
             VERSION=$(git rev-parse upstream/main | cut -c1-8)
-            VERSION_SOURCE="git_hash"
           fi
         else
-          echo "无法访问 Update.log，使用 Git 哈希"
           VERSION=$(git rev-parse upstream/main | cut -c1-8)
-          VERSION_SOURCE="git_hash"
         fi
 
+        # 生成带日期的版本号
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
-        GIT_HASH=$(git rev-parse upstream/main | cut -c1-8)
 
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
         echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
-        echo "git_hash=$GIT_HASH" >> $GITHUB_OUTPUT
-        echo "version_source=$VERSION_SOURCE" >> $GITHUB_OUTPUT
 
-        echo "=== 版本信息 ==="
-        echo "来源: $VERSION_SOURCE"
-        echo "基础版本: $VERSION"
-        echo "完整版本: $FULL_VERSION"
-        echo "构建时间: $BUILD_TIME"
-        echo "Git 哈希: $GIT_HASH"
-
-    - name: Check for upstream updates
-      id: check_updates
+    - name: Check for updates
+      id: check
       run: |
-        UPSTREAM_COMMIT=$(git rev-parse upstream/main)
-        LOCAL_COMMIT=$(git rev-parse main)
+        UPSTREAM=$(git rev-parse upstream/main)
+        LOCAL=$(git rev-parse main)
 
-        echo "上游提交: $UPSTREAM_COMMIT"
-        echo "本地提交: $LOCAL_COMMIT"
-
-        if [ "$UPSTREAM_COMMIT" != "$LOCAL_COMMIT" ]; then
-          echo "✅ 发现上游更新！"
+        if [ "$UPSTREAM" != "$LOCAL" ]; then
           echo "has_update=true" >> $GITHUB_OUTPUT
-          echo "old_commit=$LOCAL_COMMIT" >> $GITHUB_OUTPUT
-          echo "new_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
         else
-          echo "❌ 没有发现更新"
           echo "has_update=false" >> $GITHUB_OUTPUT
         fi
-
-    - name: Force build (manual trigger)
-      if: github.event.inputs.force_build == 'true'
-      run: |
-        echo "force_build=true" >> $GITHUB_OUTPUT
-        echo "强制构建模式已启用"
-
-    - name: Configure Docker mirrors for China
-      run: |
-        sudo mkdir -p /etc/docker
-        sudo tee /etc/docker/daemon.json <<EOF
-        {
-          "registry-mirrors": [
-            "https://docker.mirrors.ustc.edu.cn",
-            "https://hub-mirror.c.163.com",
-            "https://mirror.ccs.tencentyun.com"
-          ]
-        }
-        EOF
-        sudo systemctl restart docker || true
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -141,9 +92,8 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # 修复：标签部分没有注释，确保格式正确
     - name: Build and push Docker image
-      if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -151,62 +101,24 @@ jobs:
         push: true
         tags: |
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.git_hash }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:v${{ steps.version.outputs.version }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:build-${{ steps.version.outputs.build_time }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
         platforms: linux/amd64
         build-args: |
           APP_VERSION=${{ steps.version.outputs.full_version }}
-          BASE_VERSION=${{ steps.version.outputs.version }}
-          VERSION_SOURCE=${{ steps.version.outputs.version_source }}
-          GIT_COMMIT=${{ steps.version.outputs.git_hash }}
-          BUILD_TIME=${{ steps.version.outputs.build_time }}
 
     - name: Update local repo
-      if: steps.check_updates.outputs.has_update == 'true'
+      if: steps.check.outputs.has_update == 'true'
       run: |
-        git merge --no-ff upstream/main -m "Auto-merge upstream changes: ${{ steps.check_updates.outputs.new_commit }} (v${{ steps.version.outputs.version }})"
+        git config --global user.name 'github-actions'
+        git config --global user.email 'actions@github.com'
+        git merge --no-ff upstream/main -m "Auto-merge: ${{ steps.check.outputs.new_commit }}"
         git push origin main
 
-    - name: Send notification via logs
-      if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+    - name: Notification
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
-        echo ""
-        echo "=================================================="
         echo "✅ 构建完成！"
-        echo "=================================================="
-        echo "镜像地址: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}"
-        echo "版本来源: ${{ steps.version.outputs.version_source }}"
-        echo "基础版本: ${{ steps.version.outputs.version }}"
-        echo "完整版本: ${{ steps.version.outputs.full_version }}"
-        echo "Git 哈希: ${{ steps.version.outputs.git_hash }}"
-        echo "构建时间: ${{ steps.version.outputs.build_time }}"
-        echo "=================================================="
-
-        mkdir -p build-info
-        cat > build-info/build-info.txt << EOF
-        构建时间: ${{ steps.version.outputs.build_time }}
-        镜像地址: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}
-        版本: ${{ steps.version.outputs.full_version }}
-        基础版本: ${{ steps.version.outputs.version }}
-        Git 哈希: ${{ steps.version.outputs.git_hash }}
-        版本来源: ${{ steps.version.outputs.version_source }}
-        EOF
-
-    - name: Upload build info
-      if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-info-${{ steps.version.outputs.full_version }}
-        path: build-info/
-        retention-days: 7
-
-    - name: Cleanup build cache
-      if: always()
-      run: |
-        echo "清理构建缓存..."
-        docker buildx prune -f
+        echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
+        echo "版本: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}"
