@@ -1,11 +1,9 @@
 name: Auto Build QQ Farm Bot UI with Version Management
 
 on:
-  # 每4小时检查一次上游更新
   schedule:
     - cron: '0 */4 * * *'
 
-  # 允许手动触发
   workflow_dispatch:
     inputs:
       force_build:
@@ -17,63 +15,53 @@ on:
           - 'true'
           - 'false'
 
-  # 推送到 main 分支时也触发
   push:
     branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 增加超时时间，防止构建超时
+    timeout-minutes: 60
 
     steps:
-    # 1. 检出你的仓库
     - name: Checkout your repo
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取完整历史记录
+        fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 2. 设置构建环境
+    # 修复：移除 install: true 参数
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      with:
-        install: true
 
-    # 3. 配置Git
     - name: Configure Git
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-    # 4. 添加上游远程仓库
     - name: Add upstream remote
       run: |
         git remote remove upstream || true
         git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         git fetch upstream --depth=1
 
-    # 5. 从 Update.log 读取版本号
     - name: Get version from Update.log
       id: version
       run: |
         echo "=== 从 Update.log 读取版本号 ==="
 
-        # 尝试从上游 Update.log 获取版本
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
         if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
           echo "获取 Update.log 内容..."
           UPDATE_LOG_CONTENT=$(curl -s "$UPDATE_LOG_URL")
 
-          # 提取后端版本（优先）
           BACKEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
           FRONTEND_VERSION=$(echo "$UPDATE_LOG_CONTENT" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
 
           echo "前端版本: $FRONTEND_VERSION"
           echo "后端版本: $BACKEND_VERSION"
 
-          # 优先使用后端版本
           if [ -n "$BACKEND_VERSION" ]; then
             VERSION="$BACKEND_VERSION"
             VERSION_SOURCE="upstream_update_log_backend"
@@ -91,14 +79,10 @@ jobs:
           VERSION_SOURCE="git_hash"
         fi
 
-        # 生成完整版本号
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
-
-        # 获取 Git 提交哈希
         GIT_HASH=$(git rev-parse upstream/main | cut -c1-8)
 
-        # 输出到 GitHub Actions
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
         echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
@@ -112,7 +96,6 @@ jobs:
         echo "构建时间: $BUILD_TIME"
         echo "Git 哈希: $GIT_HASH"
 
-    # 6. 检查是否有更新
     - name: Check for upstream updates
       id: check_updates
       run: |
@@ -132,14 +115,12 @@ jobs:
           echo "has_update=false" >> $GITHUB_OUTPUT
         fi
 
-    # 7. 强制构建（手动触发时）
     - name: Force build (manual trigger)
       if: github.event.inputs.force_build == 'true'
       run: |
         echo "force_build=true" >> $GITHUB_OUTPUT
         echo "强制构建模式已启用"
 
-    # 8. 配置中国镜像源（针对网络问题）
     - name: Configure Docker mirrors for China
       run: |
         sudo mkdir -p /etc/docker
@@ -154,14 +135,13 @@ jobs:
         EOF
         sudo systemctl restart docker || true
 
-    # 9. 登录 Docker Hub
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # 10. 构建并推送镜像（有更新或强制构建时）
+    # 修复：标签部分没有注释，确保格式正确
     - name: Build and push Docker image
       if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       uses: docker/build-push-action@v5
@@ -170,22 +150,11 @@ jobs:
         file: ./core/Dockerfile
         push: true
         tags: |
-          # 最新版本（总是更新）
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-
-          # 语义化版本（从 Update.log）
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
-
-          # 完整版本（带时间戳）
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}
-
-          # Git 哈希版本（确保唯一性）
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.git_hash }}
-
-          # 带前缀的版本
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:v${{ steps.version.outputs.version }}
-
-          # 日期版本
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:build-${{ steps.version.outputs.build_time }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
@@ -197,14 +166,12 @@ jobs:
           GIT_COMMIT=${{ steps.version.outputs.git_hash }}
           BUILD_TIME=${{ steps.version.outputs.build_time }}
 
-    # 11. 更新本地仓库（如果是自动更新）
     - name: Update local repo
       if: steps.check_updates.outputs.has_update == 'true'
       run: |
         git merge --no-ff upstream/main -m "Auto-merge upstream changes: ${{ steps.check_updates.outputs.new_commit }} (v${{ steps.version.outputs.version }})"
         git push origin main
 
-    # 12. 发送通知（通过日志）
     - name: Send notification via logs
       if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
@@ -220,7 +187,6 @@ jobs:
         echo "构建时间: ${{ steps.version.outputs.build_time }}"
         echo "=================================================="
 
-        # 保存构建信息到文件（可选）
         mkdir -p build-info
         cat > build-info/build-info.txt << EOF
         构建时间: ${{ steps.version.outputs.build_time }}
@@ -231,7 +197,6 @@ jobs:
         版本来源: ${{ steps.version.outputs.version_source }}
         EOF
 
-    # 13. 上传构建信息（可选）
     - name: Upload build info
       if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       uses: actions/upload-artifact@v4
@@ -240,92 +205,6 @@ jobs:
         path: build-info/
         retention-days: 7
 
-    # 14. 发送 Discord 通知（可选，需要配置 DISCORD_WEBHOOK）
-    - name: Discord Notification
-      if: (steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true') && env.DISCORD_WEBHOOK != ''
-      uses: Ilshidur/action-discord@master
-      env:
-        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-      with:
-        args: |
-          ✅ **QQ Farm Bot UI 构建完成！**
-          📦 镜像: `{{ secrets.DOCKERHUB_USERNAME }}/{{ secrets.DOCKERHUB_REPO }}`
-          🏷️ 版本: `{{ steps.version.outputs.full_version }}`
-          🔖 基础版本: `{{ steps.version.outputs.version }}`
-          🔗 Git 哈希: `{{ steps.version.outputs.git_hash }}`
-          ⏰ 构建时间: `{{ steps.version.outputs.build_time }}`
-          📍 来源: `{{ steps.version.outputs.version_source }}`
-
-    # 15. 发送 Slack 通知（可选，需要配置 SLACK_WEBHOOK）
-    - name: Slack Notification
-      if: (steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true') && env.SLACK_WEBHOOK != ''
-      uses: slackapi/slack-github-action@v1.24.0
-      env:
-        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
-      with:
-        payload: |
-          {
-            "text": "✅ QQ Farm Bot UI 构建完成！",
-            "blocks": [
-              {
-                "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "✅ QQ Farm Bot UI 构建完成！"
-                }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  {
-                    "type": "mrkdwn",
-                    "text": "*镜像:*\n`${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}`"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*版本:*\n`${{ steps.version.outputs.full_version }}`"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*基础版本:*\n`${{ steps.version.outputs.version }}`"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Git 哈希:*\n`${{ steps.version.outputs.git_hash }}`"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*构建时间:*\n`${{ steps.version.outputs.build_time }}`"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*版本来源:*\n`${{ steps.version.outputs.version_source }}`"
-                  }
-                ]
-              }
-            ]
-          }
-
-    # 16. 发送 Telegram 通知（可选，需要配置 TELEGRAM_TOKEN 和 TELEGRAM_CHAT_ID）
-    - name: Telegram Notification
-      if: (steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true') && env.TELEGRAM_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
-      uses: appleboy/telegram-action@master
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      with:
-        message: |
-          ✅ QQ Farm Bot UI 构建完成！
-
-          📦 镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}
-          🏷️ 版本: ${{ steps.version.outputs.full_version }}
-          🔖 基础版本: ${{ steps.version.outputs.version }}
-          🔗 Git 哈希: ${{ steps.version.outputs.git_hash }}
-          ⏰ 构建时间: ${{ steps.version.outputs.build_time }}
-          📍 来源: ${{ steps.version.outputs.version_source }}
-
-    # 17. 清理构建缓存（可选）
     - name: Cleanup build cache
       if: always()
       run: |
