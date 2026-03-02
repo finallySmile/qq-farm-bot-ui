@@ -1,4 +1,4 @@
-name: Auto Build QQ Farm Bot UI - Fixed Version Reading
+name: Auto Build QQ Farm Bot UI - Debug Version Fix
 
 on:
   schedule:
@@ -43,40 +43,55 @@ jobs:
         git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         git fetch upstream --depth=1
 
-    - name: Get version from Update.log (Fixed)
+    - name: Get version from Update.log (Debug & Fix)
       id: version
       run: |
         echo "=== 从 Update.log 读取版本号 ==="
 
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
+        # 检查文件是否存在
         if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
           echo "✅ Update.log 文件存在"
 
-          # 读取第一行
-          FIRST_LINE=$(curl -s "$UPDATE_LOG_URL" | head -1)
-          echo "Update.log 第一行: $FIRST_LINE"
+          # 获取文件内容
+          CONTENT=$(curl -s "$UPDATE_LOG_URL")
 
-          # 针对您的格式提取版本号
+          # 显示前5行，便于调试
+          echo ""
+          echo "Update.log 前5行内容:"
+          echo "$CONTENT" | head -5
+
+          # 提取版本号 - 多种方法尝试
+          echo ""
+          echo "尝试提取版本号..."
+
+          # 方法1: 提取 v2.0.3 格式
+          VERSION_V=$(echo "$CONTENT" | grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | head -1 | sed 's/^v//')
+          echo "方法1 (vX.Y.Z): $VERSION_V"
+
+          # 方法2: 提取 X.Y.Z 格式
+          VERSION_RAW=$(echo "$CONTENT" | grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          echo "方法2 (X.Y.Z): $VERSION_RAW"
+
+          # 方法3: 提取特定格式（针对您的Update.log）
           # 格式：2026-03-02 一次更新 前端：v2.0.3 后端：v2.0.3
-
-          # 提取后端版本（优先）
-          BACKEND_VERSION=$(echo "$FIRST_LINE" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-
-          # 提取前端版本
-          FRONTEND_VERSION=$(echo "$FIRST_LINE" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          VERSION_SPECIFIC=$(echo "$CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          echo "方法3 (后端版本): $VERSION_SPECIFIC"
 
           # 选择版本号
-          if [ -n "$BACKEND_VERSION" ]; then
-            VERSION="$BACKEND_VERSION"
+          if [ -n "$VERSION_SPECIFIC" ]; then
+            VERSION="$VERSION_SPECIFIC"
             echo "✅ 使用后端版本: $VERSION"
-          elif [ -n "$FRONTEND_VERSION" ]; then
-            VERSION="$FRONTEND_VERSION"
-            echo "✅ 使用前端版本: $VERSION"
+          elif [ -n "$VERSION_V" ]; then
+            VERSION="$VERSION_V"
+            echo "✅ 使用v格式版本: $VERSION"
+          elif [ -n "$VERSION_RAW" ]; then
+            VERSION="$VERSION_RAW"
+            echo "✅ 使用原始版本: $VERSION"
           else
-            echo "❌ 未找到版本号，使用 Git 哈希"
             VERSION=$(git rev-parse upstream/main | cut -c1-8)
-            echo "使用 Git 哈希: $VERSION"
+            echo "❌ 未找到版本号，使用 Git 哈希: $VERSION"
           fi
         else
           echo "❌ 无法访问 Update.log"
@@ -91,6 +106,7 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
         echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+
         echo ""
         echo "=== 最终结果 ==="
         echo "基础版本: $VERSION"
