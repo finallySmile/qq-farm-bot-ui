@@ -1,147 +1,100 @@
 name: Auto Build QQ Farm Bot UI
 
 on:
-  # 每4小时检查一次上游更新
   schedule:
     - cron: '0 */4 * * *'
-
-  # 允许手动触发
   workflow_dispatch:
     inputs:
       force_build:
-        description: '强制构建（即使没有更新）'
+        description: '强制构建'
         required: false
         default: 'false'
         type: choice
         options:
           - 'true'
           - 'false'
-
-  # 推送到main分支时也触发
   push:
     branches: [ main ]
 
 jobs:
-  check-and-build:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-    # 1. 检出你的仓库
-    - name: Checkout your repo
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 2. 设置构建环境
+    - name: Debug - Check project structure
+      run: |
+        echo "=== 项目根目录 ==="
+        pwd
+        ls -la
+        echo ""
+        echo "===检查 core 目录 ==="
+        ls -la core/
+        echo ""
+        echo "=== 检查 core/Dockerfile ==="
+        if [ -f core/Dockerfile ]; then
+          echo "✅ core/Dockerfile 存在"
+          echo "文件大小: $(wc -c < core/Dockerfile) 字节"
+          echo "前10行:"
+          head -10 core/Dockerfile
+        else
+          echo "❌ core/Dockerfile 不存在"
+          exit 1
+        fi
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-      with:
-        install: true
 
-    # 3. 配置Git
-    - name: Configure Git
-      run: |
-        git config --global user.name 'github-actions[bot]'
-        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-
-    # 4. 添加上游远程仓库
     - name: Add upstream remote
       run: |
-        git remote remove upstream || true
         git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         git fetch upstream --depth=1
 
-    # 5. 检查是否有更新
-    - name: Check for upstream updates
-      id: check_updates
+    - name: Check for updates
+      id: check
       run: |
-        UPSTREAM_COMMIT=$(git rev-parse upstream/main)
-        LOCAL_COMMIT=$(git rev-parse main)
+        UPSTREAM=$(git rev-parse upstream/main)
+        LOCAL=$(git rev-parse main)
 
-        echo "上游提交: $UPSTREAM_COMMIT"
-        echo "本地提交: $LOCAL_COMMIT"
-
-        if [ "$UPSTREAM_COMMIT" != "$LOCAL_COMMIT" ]; then
-          echo "✅ 发现上游更新！"
+        if [ "$UPSTREAM" != "$LOCAL" ]; then
           echo "has_update=true" >> $GITHUB_OUTPUT
-          echo "old_commit=$LOCAL_COMMIT" >> $GITHUB_OUTPUT
-          echo "new_commit=$UPSTREAM_COMMIT" >> $GITHUB_OUTPUT
+          echo "new_commit=$UPSTREAM" >> $GITHUB_OUTPUT
         else
-          echo "❌ 没有发现更新"
           echo "has_update=false" >> $GITHUB_OUTPUT
         fi
 
-    # 6. 如果有更新，合并并推送
-    - name: Merge upstream changes
-      if: steps.check_updates.outputs.has_update == 'true'
-      run: |
-        git merge --no-ff upstream/main -m "Auto-merge upstream changes: ${{ steps.check_updates.outputs.new_commit }}"
-        git push origin main
-
-    # 7. 配置中国镜像源（针对网络问题）
-    - name: Configure Docker mirrors for China
-      if: steps.check_updates.outputs.has_update == 'true'
-      run: |
-        sudo mkdir -p /etc/docker
-        sudo tee /etc/docker/daemon.json <<EOF
-        {
-          "registry-mirrors": [
-            "https://docker.mirrors.ustc.edu.cn",
-            "https://hub-mirror.c.163.com",
-            "https://mirror.ccs.tencentyun.com"
-          ]
-        }
-        EOF
-        sudo systemctl restart docker || true
-
-    # 8. 登录 Docker Hub
     - name: Login to Docker Hub
-      if: steps.check_updates.outputs.has_update == 'true'
+      if: steps.check.outputs.has_update == 'true'
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # 9. 构建并推送镜像（针对项目特点优化）
-    - name: Build and push Docker image
-      if: steps.check_updates.outputs.has_update == 'true'
+    - name: Build and push
+      if: steps.check.outputs.has_update == 'true'
       uses: docker/build-push-action@v5
       with:
-        context: .
+        context: .  # 项目根目录
+        file: ./core/Dockerfile  # 指定 core 目录中的 Dockerfile
         push: true
         tags: |
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.check_updates.outputs.new_commit }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:v${{ steps.check_updates.outputs.new_commit }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.check.outputs.new_commit }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
         platforms: linux/amd64
-        # 优化：使用项目中的NPM镜像源
         build-args: |
           NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/
 
-    # 10. 强制构建（手动触发时）
-    - name: Force build (manual trigger)
-      if: github.event.inputs.force_build == 'true'
+    - name: Update local repo
+      if: steps.check.outputs.has_update == 'true'
       run: |
-        echo "force_build=true" >> $GITHUB_OUTPUT
-
-    - name: Build and push (force mode)
-      if: github.event.inputs.force_build == 'true'
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:manual-$(date +%Y%m%d-%H%M%S)
-
-    # 11. 发送通知
-    - name: Send notification
-      if: steps.check_updates.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
-      run: |
-        echo "✅ 构建完成！"
-        echo "镜像地址: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}"
-        echo "上游更新: ${{ steps.check_updates.outputs.new_commit }}"
+        git config --global user.name 'github-actions'
+        git config --global user.email 'actions@github.com'
+        git merge --no-ff upstream/main -m "Auto-merge: ${{ steps.check.outputs.new_commit }}"
+        git push origin main
