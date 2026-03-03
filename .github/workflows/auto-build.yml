@@ -1,4 +1,4 @@
-name: Auto Build QQ Farm Bot UI - Fixed Merge
+name: Auto Build QQ Farm Bot UI - Merge Conflict Fix
 
 on:
   schedule:
@@ -107,8 +107,7 @@ jobs:
         build-args: |
           APP_VERSION=${{ steps.version.outputs.full_version }}
 
-    # 方案1：允许合并无关历史
-    - name: Update local repo (Allow unrelated histories)
+    - name: Update local repo (Accept upstream changes)
       if: steps.check.outputs.has_update == 'true'
       run: |
         git config --global user.name 'github-actions'
@@ -117,8 +116,8 @@ jobs:
         # 拉取最新更改
         git pull --rebase origin main || true
 
-        # 允许合并无关历史
-        git merge --no-ff --allow-unrelated-histories upstream/main -m "Auto-merge: ${{ steps.check.outputs.new_commit }}"
+        # 合并时自动接受上游的更改（-X theirs）
+        git merge --no-ff --allow-unrelated-histories -X theirs upstream/main -m "Auto-merge: ${{ steps.check.outputs.new_commit }}"
 
         # 推送
         git push origin main
