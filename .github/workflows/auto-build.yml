@@ -1,4 +1,4 @@
-name: Auto Build QQ Farm Bot UI - Latest Code Only
+name: Build Only When Version Changes (Simple)
 
 on:
   schedule:
@@ -15,13 +15,73 @@ on:
           - 'true'
           - 'false'
 
-  push:
-    branches: [ main ]
-
 jobs:
-  build:
+  check-version:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    outputs:
+      version_changed: ${{ steps.check.outputs.version_changed }}
+      current_version: ${{ steps.current.outputs.current_version }}
+
+    steps:
+    - name: Get current version
+      id: current
+      run: |
+        UPDATE_LOG_URL="https://raw.githubusercontent.com/smdk000/qq-farm-bot-ui/main/Update.log"
+
+        if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
+          CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+            grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
+            head -1)
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+              grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | \
+              head -1 | \
+              sed 's/^v//')
+          fi
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+              grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | \
+              head -1)
+          fi
+        else
+          CURRENT_VERSION="unknown"
+        fi
+
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Get previous version
+      id: previous
+      run: |
+        # 使用 GitHub 缓存获取上次版本
+        if [ -f .github/workflows/last_version.txt ]; then
+          PREVIOUS_VERSION=$(cat .github/workflows/last_version.txt)
+        else
+          PREVIOUS_VERSION="0.0.0"
+        fi
+
+        echo "previous_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Check if version changed
+      id: check
+      run: |
+        CURRENT="${{ steps.current.outputs.current_version }}"
+        PREVIOUS="${{ steps.previous.outputs.previous_version }}"
+
+        echo "当前版本: $CURRENT"
+        echo "上次版本: $PREVIOUS"
+
+        if [ "$CURRENT" != "$PREVIOUS" ]; then
+          echo "version_changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "version_changed=false" >> $GITHUB_OUTPUT        fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true' || github.event.inputs.force_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
     - name: Checkout
@@ -32,60 +92,21 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Sync with upstream (Get latest code)
+    - name: Sync with upstream
       run: |
-        # 添加上游远程
-        if ! git remote | grep -q upstream; then
-          git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
-        fi
-
-        # 获取上游最新
+        git remote add upstream https://github.com/smdk000/qq-farm-bot-ui.git || true
         git fetch upstream main
-
-        # 重置到上游（确保使用最新代码）
         git reset --hard upstream/main
 
-    - name: Get version from Update.log
+    - name: Get version
       id: version
       run: |
-        VERSION=$(curl -s https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log | \
-          grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
-          head -1)
-
-        if [ -z "$VERSION" ]; then
-          VERSION=$(curl -s https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log | \
-            grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | \
-            head -1 | \
-            sed 's/^v//')
-        fi
-
-        if [ -z "$VERSION" ]; then
-          VERSION=$(git rev-parse HEAD | cut -c1-8)
-        fi
-
+        VERSION="${{ needs.check-version.outputs.current_version }}"
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
 
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
-        echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
-
-    - name: Check for updates
-      id: check
-      run: |
-        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
-        CURRENT_VERSION=$(cat .github/workflows/current_version.txt 2>/dev/null || echo "")
-        LATEST_VERSION=$(curl -s "$UPDATE_LOG_URL" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-
-        if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-          echo "✅ 发现版本更新！"
-          echo "has_update=true" >> $GITHUB_OUTPUT
-          echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-          echo "$LATEST_VERSION" > .github/workflows/current_version.txt
-        else
-          echo "❌ 没有发现版本更新"
-          echo "has_update=false" >> $GITHUB_OUTPUT
-        fi
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -93,25 +114,29 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build and push Docker image
-      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+    - name: Build and push
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./core/Dockerfile
+        file: ./Dockerfile
         push: true
         tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.version.outputs.full_version }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
         platforms: linux/amd64
-        build-args: |
-          APP_VERSION=${{ steps.version.outputs.full_version }}
+
+    - name: Save version
+      run: |
+        echo "${{ needs.check-version.outputs.current_version }}" > .github/workflows/last_version.txt
+        git config --global user.name 'github-actions'
+        git config --global user.email 'actions@github.com'
+        git add .github/workflows/last_version.txt
+        git commit -m "Update version to ${{ needs.check-version.outputs.current_version }}" || echo "No changes"
+        git push origin main || echo "Push failed"
 
     - name: Notification
-      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
-        echo "✅ 构建完成！"
-        echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
-        echo "版本: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}"
+        echo "✅ 版本更新构建完成！"
+        echo "版本: ${{ steps.version.outputs.full_version }}"
