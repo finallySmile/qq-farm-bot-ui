@@ -1,4 +1,4 @@
-name: Build QQ Farm Bot UI - Version Based (Update.log)
+name: Auto Build QQ Farm Bot UI - Version Based (Update.log Required)
 
 on:
   schedule:
@@ -19,121 +19,7 @@ on:
     branches: [ main ]
 
 jobs:
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      version_changed: ${{ steps.check.outputs.version_changed }}
-      current_version: ${{ steps.current.outputs.current_version }}
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Get current version from Update.log
-      id: current
-      run: |
-        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
-
-        echo "尝试从 Update.log 获取版本..."
-        echo "URL: $UPDATE_LOG_URL"
-
-        # 测试访问并获取内容
-        if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
-          echo "✅ Update.log 文件存在"
-
-          # 获取文件内容
-          CONTENT=$(curl -s "$UPDATE_LOG_URL")
-
-          echo "Update.log 内容（前10行）:"
-          echo "$CONTENT" | head -10
-
-          # 尝试提取版本号（根据 Update.log 格式）
-          # 格式1: 后端：v2.0.3
-          CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-
-          if [ -n "$CURRENT_VERSION" ]; then
-            echo "✅ 从 Update.log 读取到版本（格式1）: $CURRENT_VERSION"
-          fi
-
-          # 格式2: 前端：v2.0.3
-          if [ -z "$CURRENT_VERSION" ]; then
-            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-            if [ -n "$CURRENT_VERSION" ]; then
-              echo "✅ 从 Update.log 读取到版本（格式2）: $CURRENT_VERSION"
-            fi
-          fi
-
-          # 格式3: vX.Y.Z
-          if [ -z "$CURRENT_VERSION" ]; then
-            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | head -1 | sed 's/^v//')
-            if [ -n "$CURRENT_VERSION" ]; then
-              echo "✅ 从 Update.log 读取到版本（格式3）: $CURRENT_VERSION"
-            fi
-          fi
-
-          # 格式4: X.Y.Z
-          if [ -z "$CURRENT_VERSION" ]; then
-            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
-            if [ -n "$CURRENT_VERSION" ]; then
-              echo "✅ 从 Update.log 读取到版本（格式4）: $CURRENT_VERSION"
-            fi
-          fi
-
-          # 如果还是没有找到版本号，使用 Git 哈希
-          if [ -z "$CURRENT_VERSION" ]; then
-            echo "❌ 无法从 Update.log 提取版本号，使用 Git 哈希"
-            CURRENT_VERSION=$(git rev-parse HEAD | cut -c1-8)
-            echo "使用 Git 哈希: $CURRENT_VERSION"
-          fi
-        else
-          echo "❌ Update.log 文件不存在或无法访问"
-          echo "使用 Git 哈希作为版本"
-          CURRENT_VERSION=$(git rev-parse HEAD | cut -c1-8)
-          echo "使用 Git 哈希: $CURRENT_VERSION"
-        fi
-
-        echo "当前版本: $CURRENT_VERSION"
-        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-
-    - name: Get previous version
-      id: previous
-      run: |
-        if [ -f .github/workflows/last_version.txt ]; then
-          PREVIOUS_VERSION=$(cat .github/workflows/last_version.txt)
-          echo "从文件读取到上次版本: $PREVIOUS_VERSION"
-        else
-          PREVIOUS_VERSION="0.0.0"
-          echo "没有找到上次版本，使用默认值: $PREVIOUS_VERSION"
-        fi
-
-        echo "previous_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-
-    - name: Check if version changed
-      id: check
-      run: |
-        CURRENT="${{ steps.current.outputs.current_version }}"
-        PREVIOUS="${{ steps.previous.outputs.previous_version }}"
-
-        echo "当前版本: $CURRENT"
-        echo "上次版本: $PREVIOUS"
-
-        if [ "$CURRENT" != "$PREVIOUS" ]; then
-          echo "✅ 版本已变化！"
-          echo "version_changed=true" >> $GITHUB_OUTPUT
-          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
-          echo "previous_version=$PREVIOUS" >> $GITHUB_OUTPUT
-        else
-          echo "❌ 版本未变化"
-          echo "version_changed=false" >> $GITHUB_OUTPUT
-          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
-          echo "previous_version=$PREVIOUS" >> $GITHUB_OUTPUT
-        fi
-
   build:
-    needs: check-version
-    if: needs.check-version.outputs.version_changed == 'true' || github.event.inputs.force_build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -146,104 +32,105 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Sync with upstream
+    - name: Sync with upstream (Get latest code)
       run: |
-        git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git || true
-        git fetch upstream main
-        git reset --hard upstream/main
-
-    - name: Check if Dockerfile exists
-      id: check-dockerfile
-      run: |
-        echo "检查项目文件..."
-        ls -la
-
-        if [ -f "core/Dockerfile" ]; then
-          echo "✅ core/Dockerfile 存在"
-          echo "has_dockerfile=true" >> $GITHUB_OUTPUT
-        else
-          echo "❌ core/Dockerfile 不存在"
-          echo "查找可能的 Dockerfile 位置..."
-          find . -name "Dockerfile" -o -name "dockerfile" -o -name "Dockerfile.*"
-          echo "has_dockerfile=false" >> $GITHUB_OUTPUT
+        # 添加上游远程
+        if ! git remote | grep -q upstream; then
+          git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         fi
 
-    - name: Create Dockerfile if missing
-      if: steps.check-dockerfile.outputs.has_dockerfile == 'false'
-      run: |
-        echo "创建 Dockerfile..."
+        # 获取上游最新
+        git fetch upstream main
 
-        cat > core/Dockerfile << 'EOF'
-# Dockerfile for QQ Farm Bot UI
-FROM node:20-alpine AS builder
+        # 重置到上游（确保使用最新代码）
+        git reset --hard upstream/main
 
-WORKDIR /app
-
-# 启用 pnpm
-RUN corepack enable
-
-# 复制 package 文件
-COPY package.json pnpm-lock.yaml ./
-COPY core/package.json ./core/
-COPY web/package.json ./web/
-
-# 配置 NPM 镜像源（针对中国网络）
-RUN npm config set registry https://mirrors.cloud.tencent.com/npm/
-
-# 安装所有依赖
-RUN pnpm install --frozen-lockfile
-
-# 复制源代码
-COPY core ./core
-COPY web ./web
-
-# 构建项目
-RUN pnpm build
-
-# ==========================================
-# 生产阶段
-FROM node:20-alpine AS runner
-
-WORKDIR /app/core
-
-# 设置环境变量
-ENV NODE_ENV=production
-ENV TZ=Asia/Shanghai
-
-# 复制运行时依赖
-COPY --from=builder /app/node_modules ../node_modules/
-COPY --from=builder /app/core/node_modules ./node_modules/
-COPY --from=builder /app/package.json ../package.json
-
-# 复制核心源代码
-COPY --from=builder /app/core ./
-
-# 复制构建好的前端资源
-COPY --from=builder /app/web/dist ../web/dist
-
-# 创建数据目录
-RUN mkdir -p /app/core/data /app/core/logs /app/core/backup
-
-# 暴露端口
-EXPOSE 3000
-
-# 启动命令
-CMD ["node", "client.js"]
-EOF
-
-        echo "✅ Dockerfile 已创建"
-        cat core/Dockerfile
-
-    - name: Get version
+    - name: Get version from Update.log
       id: version
       run: |
-        VERSION="${{ needs.check-version.outputs.current_version }}"
+        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
+
+        echo "尝试从Update.log获取版本号..."
+        echo "URL: $UPDATE_LOG_URL"
+
+        # 测试访问
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$UPDATE_LOG_URL")
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "✅ Update.log文件存在 (HTTP $HTTP_CODE)"
+
+          # 获取版本号
+          VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+            grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
+            head -1)
+
+          if [ -z "$VERSION" ]; then
+            VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+              grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | \
+              head -1 | \
+              sed 's/^v//')
+          fi
+
+          if [ -n "$VERSION" ]; then
+            echo "✅ 从Update.log获取版本: $VERSION"
+          else
+            echo "❌ 无法从Update.log提取版本号"
+            echo "Update.log内容:"
+            curl -s "$UPDATE_LOG_URL" | head -10
+            exit 1
+          fi
+        else
+          echo "❌ Update.log文件不存在或无法访问 (HTTP $HTTP_CODE)"
+          echo "跳过构建，不更新Docker镜像"
+          exit 1
+        fi
+
+        # 生成完整版本号
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
 
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
         echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+
+    - name: Check for updates
+      id: check
+      run: |
+        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
+
+        # 尝试获取上次版本
+        if [ -f .github/workflows/last_version.txt ]; then
+          CURRENT_VERSION=$(cat .github/workflows/last_version.txt)
+          echo "从文件读取到上次版本: $CURRENT_VERSION"
+        else
+          CURRENT_VERSION="0.0.0"
+          echo "没有找到上次版本，使用默认值: $CURRENT_VERSION"
+        fi
+
+        # 获取最新版本
+        LATEST_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+          grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
+          head -1)
+
+        if [ -z "$LATEST_VERSION" ]; then
+          LATEST_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+            grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | \
+            head -1 | \
+            sed 's/^v//')
+        fi
+
+        echo "当前版本: $CURRENT_VERSION"
+        echo "最新版本: $LATEST_VERSION"
+
+        # 只有当版本号有效且不同时才构建
+        if [ -n "$LATEST_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+          echo "✅ 版本已变化！"
+          echo "has_update=true" >> $GITHUB_OUTPUT
+          echo "new_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+        else
+          echo "❌ 版本未变化"
+          echo "has_update=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -252,6 +139,7 @@ EOF
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Build and push Docker image
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -267,15 +155,17 @@ EOF
           APP_VERSION=${{ steps.version.outputs.full_version }}
 
     - name: Save version
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
-        echo "${{ needs.check-version.outputs.current_version }}" > .github/workflows/last_version.txt
+        echo "${{ steps.check.outputs.new_version }}" > .github/workflows/last_version.txt
         git config --global user.name 'github-actions'
         git config --global user.email 'actions@github.com'
         git add .github/workflows/last_version.txt
-        git commit -m "Update version to ${{ needs.check-version.outputs.current_version }}" || echo "No changes"
+        git commit -m "Update version to ${{ steps.check.outputs.new_version }}" || echo "No changes"
         git push origin main || echo "Push failed"
 
     - name: Notification
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
         echo "✅ 构建完成！"
         echo "版本: ${{ steps.version.outputs.full_version }}"
