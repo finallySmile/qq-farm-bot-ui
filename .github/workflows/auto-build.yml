@@ -34,15 +34,10 @@ jobs:
 
     - name: Sync with upstream (Get latest code)
       run: |
-        # 添加上游远程
         if ! git remote | grep -q upstream; then
           git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
         fi
-
-        # 获取上游最新
         git fetch upstream main
-
-        # 重置到上游（确保使用最新代码）
         git reset --hard upstream/main
 
     - name: Get version from Update.log
@@ -53,13 +48,11 @@ jobs:
         echo "尝试从Update.log获取版本号..."
         echo "URL: $UPDATE_LOG_URL"
 
-        # 测试访问
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$UPDATE_LOG_URL")
 
         if [ "$HTTP_CODE" = "200" ]; then
           echo "✅ Update.log文件存在 (HTTP $HTTP_CODE)"
 
-          # 获取版本号
           VERSION=$(curl -s "$UPDATE_LOG_URL" | \
             grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
             head -1)
@@ -85,7 +78,6 @@ jobs:
           exit 1
         fi
 
-        # 生成完整版本号
         BUILD_TIME=$(date +%Y%m%d-%H%M%S)
         FULL_VERSION="${VERSION}-${BUILD_TIME}"
 
@@ -98,7 +90,6 @@ jobs:
       run: |
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
-        # 尝试获取上次版本
         if [ -f .github/workflows/last_version.txt ]; then
           CURRENT_VERSION=$(cat .github/workflows/last_version.txt)
           echo "从文件读取到上次版本: $CURRENT_VERSION"
@@ -107,7 +98,6 @@ jobs:
           echo "没有找到上次版本，使用默认值: $CURRENT_VERSION"
         fi
 
-        # 获取最新版本
         LATEST_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
           grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
           head -1)
@@ -122,7 +112,6 @@ jobs:
         echo "当前版本: $CURRENT_VERSION"
         echo "最新版本: $LATEST_VERSION"
 
-        # 只有当版本号有效且不同时才构建
         if [ -n "$LATEST_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
           echo "✅ 版本已变化！"
           echo "has_update=true" >> $GITHUB_OUTPUT
@@ -131,6 +120,14 @@ jobs:
           echo "❌ 版本未变化"
           echo "has_update=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: Debug version variables
+      run: |
+        echo "=== 调试信息 ==="
+        echo "has_update: ${{ steps.check.outputs.has_update }}"
+        echo "new_version: ${{ steps.check.outputs.new_version }}"
+        echo "current_version: ${{ steps.version.outputs.version }}"
+        echo "full_version: ${{ steps.version.outputs.full_version }}"
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -157,12 +154,32 @@ jobs:
     - name: Save version
       if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
-        echo "${{ steps.check.outputs.new_version }}" > .github/workflows/last_version.txt
+        # 确定要保存的版本号
+        if [ -n "${{ steps.check.outputs.new_version }}" ]; then
+          VERSION_TO_SAVE="${{ steps.check.outputs.new_version }}"
+        elif [ -n "${{ steps.version.outputs.version }}" ]; then
+          VERSION_TO_SAVE="${{ steps.version.outputs.version }}"
+        else
+          VERSION_TO_SAVE="unknown"
+        fi
+
+        echo "保存版本号: $VERSION_TO_SAVE"
+
+        # 创建目录
+        mkdir -p .github/workflows
+
+        # 保存版本号
+        echo "$VERSION_TO_SAVE" > .github/workflows/last_version.txt
+
+        echo "文件已创建，内容:"
+        cat .github/workflows/last_version.txt
+
+        # 提交到仓库
         git config --global user.name 'github-actions'
         git config --global user.email 'actions@github.com'
         git add .github/workflows/last_version.txt
-        git commit -m "Update version to ${{ steps.check.outputs.new_version }}" || echo "No changes"
-        git push origin main || echo "Push failed"
+        git commit -m "Update version to $VERSION_TO_SAVE" || echo "No changes to commit"
+        git push origin main || echo "Push failed, but file was created"
 
     - name: Notification
       if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
