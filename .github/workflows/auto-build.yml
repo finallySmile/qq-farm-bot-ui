@@ -1,4 +1,4 @@
-name: Build Only When Version Changes (Simple)
+name: Build QQ Farm Bot UI - Version Based (Update.log)
 
 on:
   schedule:
@@ -15,6 +15,9 @@ on:
           - 'true'
           - 'false'
 
+  push:
+    branches: [ main ]
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
@@ -23,32 +26,75 @@ jobs:
       current_version: ${{ steps.current.outputs.current_version }}
 
     steps:
-    - name: Get current version
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get current version from Update.log
       id: current
       run: |
-        UPDATE_LOG_URL="https://raw.githubusercontent.com/smdk000/qq-farm-bot-ui/main/Update.log"
+        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
+        echo "尝试从 Update.log 获取版本..."
+        echo "URL: $UPDATE_LOG_URL"
+
+        # 测试访问并获取内容
         if curl -s --head "$UPDATE_LOG_URL" | grep -q "200 OK"; then
-          CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
-            grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
-            head -1)
+          echo "✅ Update.log 文件存在"
 
-          if [ -z "$CURRENT_VERSION" ]; then
-            CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
-              grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | \
-              head -1 | \
-              sed 's/^v//')
+          # 获取文件内容
+          CONTENT=$(curl -s "$UPDATE_LOG_URL")
+
+          echo "Update.log 内容（前10行）:"
+          echo "$CONTENT" | head -10
+
+          # 尝试提取版本号（根据 Update.log 格式）
+          # 格式1: 后端：v2.0.3
+          CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+
+          if [ -n "$CURRENT_VERSION" ]; then
+            echo "✅ 从 Update.log 读取到版本（格式1）: $CURRENT_VERSION"
           fi
 
+          # 格式2: 前端：v2.0.3
           if [ -z "$CURRENT_VERSION" ]; then
-            CURRENT_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
-              grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | \
-              head -1)
+            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "前端：v\K[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            if [ -n "$CURRENT_VERSION" ]; then
+              echo "✅ 从 Update.log 读取到版本（格式2）: $CURRENT_VERSION"
+            fi
+          fi
+
+          # 格式3: vX.Y.Z
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "v[0-9]+\.[0-9]+\.[0-9]+" | head -1 | sed 's/^v//')
+            if [ -n "$CURRENT_VERSION" ]; then
+              echo "✅ 从 Update.log 读取到版本（格式3）: $CURRENT_VERSION"
+            fi
+          fi
+
+          # 格式4: X.Y.Z
+          if [ -z "$CURRENT_VERSION" ]; then
+            CURRENT_VERSION=$(echo "$CONTENT" | grep -oP "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            if [ -n "$CURRENT_VERSION" ]; then
+              echo "✅ 从 Update.log 读取到版本（格式4）: $CURRENT_VERSION"
+            fi
+          fi
+
+          # 如果还是没有找到版本号，使用 Git 哈希
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "❌ 无法从 Update.log 提取版本号，使用 Git 哈希"
+            CURRENT_VERSION=$(git rev-parse HEAD | cut -c1-8)
+            echo "使用 Git 哈希: $CURRENT_VERSION"
           fi
         else
-          CURRENT_VERSION="unknown"
+          echo "❌ Update.log 文件不存在或无法访问"
+          echo "使用 Git 哈希作为版本"
+          CURRENT_VERSION=$(git rev-parse HEAD | cut -c1-8)
+          echo "使用 Git 哈希: $CURRENT_VERSION"
         fi
 
+        echo "当前版本: $CURRENT_VERSION"
         echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
     - name: Get previous version
@@ -56,8 +102,10 @@ jobs:
       run: |
         if [ -f .github/workflows/last_version.txt ]; then
           PREVIOUS_VERSION=$(cat .github/workflows/last_version.txt)
+          echo "从文件读取到上次版本: $PREVIOUS_VERSION"
         else
           PREVIOUS_VERSION="0.0.0"
+          echo "没有找到上次版本，使用默认值: $PREVIOUS_VERSION"
         fi
 
         echo "previous_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
@@ -72,16 +120,22 @@ jobs:
         echo "上次版本: $PREVIOUS"
 
         if [ "$CURRENT" != "$PREVIOUS" ]; then
+          echo "✅ 版本已变化！"
           echo "version_changed=true" >> $GITHUB_OUTPUT
+          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "previous_version=$PREVIOUS" >> $GITHUB_OUTPUT
         else
+          echo "❌ 版本未变化"
           echo "version_changed=false" >> $GITHUB_OUTPUT
+          echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "previous_version=$PREVIOUS" >> $GITHUB_OUTPUT
         fi
 
   build:
     needs: check-version
     if: needs.check-version.outputs.version_changed == 'true' || github.event.inputs.force_build == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
 
     steps:
     - name: Checkout
@@ -94,9 +148,91 @@ jobs:
 
     - name: Sync with upstream
       run: |
-        git remote add upstream https://github.com/smdk000/qq-farm-bot-ui.git || true
+        git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git || true
         git fetch upstream main
         git reset --hard upstream/main
+
+    - name: Check if Dockerfile exists
+      id: check-dockerfile
+      run: |
+        echo "检查项目文件..."
+        ls -la
+
+        if [ -f "core/Dockerfile" ]; then
+          echo "✅ core/Dockerfile 存在"
+          echo "has_dockerfile=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ core/Dockerfile 不存在"
+          echo "查找可能的 Dockerfile 位置..."
+          find . -name "Dockerfile" -o -name "dockerfile" -o -name "Dockerfile.*"
+          echo "has_dockerfile=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create Dockerfile if missing
+      if: steps.check-dockerfile.outputs.has_dockerfile == 'false'
+      run: |
+        echo "创建 Dockerfile..."
+
+        cat > core/Dockerfile << 'EOF'
+# Dockerfile for QQ Farm Bot UI
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# 启用 pnpm
+RUN corepack enable
+
+# 复制 package 文件
+COPY package.json pnpm-lock.yaml ./
+COPY core/package.json ./core/
+COPY web/package.json ./web/
+
+# 配置 NPM 镜像源（针对中国网络）
+RUN npm config set registry https://mirrors.cloud.tencent.com/npm/
+
+# 安装所有依赖
+RUN pnpm install --frozen-lockfile
+
+# 复制源代码
+COPY core ./core
+COPY web ./web
+
+# 构建项目
+RUN pnpm build
+
+# ==========================================
+# 生产阶段
+FROM node:20-alpine AS runner
+
+WORKDIR /app/core
+
+# 设置环境变量
+ENV NODE_ENV=production
+ENV TZ=Asia/Shanghai
+
+# 复制运行时依赖
+COPY --from=builder /app/node_modules ../node_modules/
+COPY --from=builder /app/core/node_modules ./node_modules/
+COPY --from=builder /app/package.json ../package.json
+
+# 复制核心源代码
+COPY --from=builder /app/core ./
+
+# 复制构建好的前端资源
+COPY --from=builder /app/web/dist ../web/dist
+
+# 创建数据目录
+RUN mkdir -p /app/core/data /app/core/logs /app/core/backup
+
+# 暴露端口
+EXPOSE 3000
+
+# 启动命令
+CMD ["node", "client.js"]
+EOF
+
+        echo "✅ Dockerfile 已创建"
+        cat core/Dockerfile
 
     - name: Get version
       id: version
@@ -107,6 +243,7 @@ jobs:
 
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
+        echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -114,18 +251,20 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Build and push
+    - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./Dockerfile
+        file: ./core/Dockerfile
         push: true
         tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.version.outputs.full_version }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
         platforms: linux/amd64
+        build-args: |
+          APP_VERSION=${{ steps.version.outputs.full_version }}
 
     - name: Save version
       run: |
@@ -138,5 +277,6 @@ jobs:
 
     - name: Notification
       run: |
-        echo "✅ 版本更新构建完成！"
+        echo "✅ 构建完成！"
         echo "版本: ${{ steps.version.outputs.full_version }}"
+        echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
