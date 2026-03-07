@@ -1,14 +1,3 @@
-
-##🎯 推荐方案（方案1）
-
-使用方案1，它会：
-1. 先拉取远程更改
-2. 解决可能的冲突
-3. 然后推送更改
-
-## 📋 完整修复后的工作流
-
-```yaml
 name: Auto Build QQ Farm Bot UI - Version Based (Update.log Required)
 
 on:
