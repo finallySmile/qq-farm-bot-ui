@@ -1,3 +1,14 @@
+
+##🎯 推荐方案（方案1）
+
+使用方案1，它会：
+1. 先拉取远程更改
+2. 解决可能的冲突
+3. 然后推送更改
+
+## 📋 完整修复后的工作流
+
+```yaml
 name: Auto Build QQ Farm Bot UI - Version Based (Update.log Required)
 
 on:
@@ -121,14 +132,6 @@ jobs:
           echo "has_update=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: Debug version variables
-      run: |
-        echo "=== 调试信息 ==="
-        echo "has_update: ${{ steps.check.outputs.has_update }}"
-        echo "new_version: ${{ steps.check.outputs.new_version }}"
-        echo "current_version: ${{ steps.version.outputs.version }}"
-        echo "full_version: ${{ steps.version.outputs.full_version }}"
-
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
@@ -154,7 +157,7 @@ jobs:
     - name: Save version
       if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
       run: |
-        # 确定要保存的版本号
+        # 确定版本号
         if [ -n "${{ steps.check.outputs.new_version }}" ]; then
           VERSION_TO_SAVE="${{ steps.check.outputs.new_version }}"
         elif [ -n "${{ steps.version.outputs.version }}" ]; then
@@ -174,12 +177,34 @@ jobs:
         echo "文件已创建，内容:"
         cat .github/workflows/last_version.txt
 
-        # 提交到仓库
+        # 配置Git
         git config --global user.name 'github-actions'
         git config --global user.email 'actions@github.com'
+
+        # 添加文件到暂存区
         git add .github/workflows/last_version.txt
-        git commit -m "Update version to $VERSION_TO_SAVE" || echo "No changes to commit"
-        git push origin main || echo "Push failed, but file was created"
+
+        # 提交到本地仓库
+        if git commit -m "Update version to $VERSION_TO_SAVE"; then
+          echo "✅ Git提交成功"
+
+          # 先拉取远程更改，解决冲突
+          echo "拉取远程更改..."
+          git pull --rebase origin main || git pull origin main
+
+          # 推送
+          echo "推送更改到远程仓库..."
+          if git push origin main; then
+            echo "✅ Git推送成功"
+            echo "文件已更新到您的项目中"
+          else
+            echo "❌ Git推送失败"
+            echo "文件已创建，但未推送到远程仓库"
+          fi
+        else
+          echo "❌ Git提交失败"
+          echo "可能是没有变化需要提交"
+        fi
 
     - name: Notification
       if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
