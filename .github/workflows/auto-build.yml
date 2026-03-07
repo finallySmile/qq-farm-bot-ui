@@ -54,7 +54,6 @@ jobs:
     - name: Get previous version
       id: previous
       run: |
-        # 使用 GitHub 缓存获取上次版本
         if [ -f .github/workflows/last_version.txt ]; then
           PREVIOUS_VERSION=$(cat .github/workflows/last_version.txt)
         else
@@ -75,7 +74,8 @@ jobs:
         if [ "$CURRENT" != "$PREVIOUS" ]; then
           echo "version_changed=true" >> $GITHUB_OUTPUT
         else
-          echo "version_changed=false" >> $GITHUB_OUTPUT        fi
+          echo "version_changed=false" >> $GITHUB_OUTPUT
+        fi
 
   build:
     needs: check-version
