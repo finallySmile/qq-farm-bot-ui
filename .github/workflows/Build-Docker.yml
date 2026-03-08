@@ -1,0 +1,104 @@
+name: Auto Sync & Build Docker
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'  # 每12小时触发
+  workflow_dispatch:        # 手动触发
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 赋予全仓库操作权限
+    steps:
+      # ========== 关键1：同时检出主分支+工作流分支 ==========
+      - name: 检出主分支（业务代码）+ 工作流分支
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main  # 主分支（同步上游代码用）
+          path: main-branch  # 主分支代码放在main-branch目录
+          persist-credentials: true
+
+      - name: 检出工作流分支（单独存放workflow，永不覆盖）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: workflow-branch  # 专属分支
+          path: workflow-branch
+          persist-credentials: true
+
+      # ========== 关键2：仅同步主分支代码，不碰工作流分支 ==========
+      - name: 同步上游代码到主分支（不影响工作流）
+        id: sync
+        working-directory: ./main-branch
+        run: |
+          # 配置Git身份
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+          # 添加上游仓库
+          UPSTREAM_REPO="https://github.com/Penty-d/qq-farm-bot-ui.git"
+          UPSTREAM_BRANCH="main"
+          git remote add upstream $UPSTREAM_REPO || git remote set-url upstream $UPSTREAM_REPO
+          git fetch upstream $UPSTREAM_BRANCH --force
+
+          # 对比更新
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/$UPSTREAM_BRANCH)
+          
+          if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
+            # 强制同步上游代码到主分支（仅业务代码）
+            git reset --hard upstream/$UPSTREAM_BRANCH
+            git clean -fd
+            # 推送同步后的主分支代码
+            git push origin main --force
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "✅ 主分支已同步上游代码（工作流分支无变化）"
+          else
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  上游无更新，跳过"
+          fi
+
+      # ========== 提取版本号（从主分支的Update.log） ==========
+      - name: 提取版本号（适配部分更新）
+        if: steps.sync.outputs.has_update == 'true'
+        id: extract_version
+        working-directory: ./main-branch  # 从主分支读取Update.log
+        run: |
+          # 提取前端/后端版本，缺失则填充latest
+          FRONT_VERSION=$(grep -oP '前端：v[0-9]+\.[0-9]+\.[0-9]+' Update.log | tail -1 | awk -F '：' '{print $2}')
+          BACK_VERSION=$(grep -oP '后端：v[0-9]+\.[0-9]+\.[0-9]+' Update.log | tail -1 | awk -F '：' '{print $2}')
+          FRONT_VERSION=${FRONT_VERSION:-"latest"}
+          BACK_VERSION=${BACK_VERSION:-"latest"}
+
+          echo "✅ 版本号：前端=$FRONT_VERSION，后端=$BACK_VERSION"
+          echo "front_version=$FRONT_VERSION" >> $GITHUB_OUTPUT
+          echo "back_version=$BACK_VERSION" >> $GITHUB_OUTPUT
+
+      # ========== 登录DockerHub ==========
+      - name: 登录DockerHub
+        if: steps.sync.outputs.has_update == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ========== 构建推送镜像（从主分支代码构建） ==========
+      - name: 构建推送J4125镜像
+        if: steps.sync.outputs.has_update == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./main-branch  # 从主分支读取业务代码
+          file: ./main-branch/core/Dockerfile  # 主分支的Dockerfile路径
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.extract_version.outputs.front_version }}-${{ steps.extract_version.outputs.back_version }}
+          platforms: linux/amd64
+          no-cache: true
+          pull: true
