@@ -1,0 +1,130 @@
+name: Auto Sync & Build Docker
+
+on:
+  schedule:
+    - cron: '1 */12 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 仅保留代码读写权限，无需workflows权限
+    steps:
+      # ========== 1. 提前备份工作流文件（仓库外，永不丢失） ==========
+      - name: 备份工作流文件（仓库外）
+        run: |
+          # 直接从GitHub API下载工作流文件（无需克隆仓库，规避权限）
+          mkdir -p /tmp/workflow-backup
+          curl -s -H "Authorization: token ${{ github.token }}" \
+            https://raw.githubusercontent.com/finallySmile/qq-farm-bot-ui/main/.github/workflows/Auto-Sync-Build-Docker.yml \
+            -o /tmp/workflow-backup/Auto-Sync-Build-Docker.yml || echo "⚠️ 工作流文件备份失败（首次创建可忽略）"
+          echo "✅ 工作流文件已备份到 /tmp/workflow-backup"
+
+      # ========== 2. 检出代码（强制清理旧文件） ==========
+      - name: 检出main分支代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+          persist-credentials: true
+          clean: true
+
+      # ========== 3. 同步上游代码（核心：同步后立即恢复工作流文件，不推送） ==========
+      - name: 同步上游最新代码
+        id: sync
+        run: |
+          # 配置Git
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+
+          # 安全处理upstream远程
+          if git remote | grep -q "upstream"; then
+            git remote rm upstream
+          fi
+          git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
+          git fetch upstream main --force --prune
+
+          # 获取最新commit
+          LOCAL_COMMIT=$(git rev-parse HEAD)
+          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          
+          echo "📝 本地Commit: $LOCAL_COMMIT | 上游Commit: $UPSTREAM_COMMIT"
+
+          # 同步最新代码（仅本地同步，不推送）
+          if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
+            git reset --hard $UPSTREAM_COMMIT
+            git clean -fdx  # 彻底删除所有旧文件
+            
+            # 关键：同步后立即恢复工作流文件（本地，不推送）
+            mkdir -p .github/workflows/
+            cp /tmp/workflow-backup/Auto-Sync-Build-Docker.yml .github/workflows/ || echo "⚠️ 工作流文件恢复失败（首次创建可忽略）"
+            
+            echo "has_update=true" >> $GITHUB_OUTPUT
+            echo "✅ 已同步上游最新代码（本地），并恢复工作流文件"
+            
+            # 打印Update.log完整内容（验证）
+            echo "📝 同步后Update.log完整内容："
+            cat Update.log || echo "⚠️ Update.log不存在"
+          else
+            echo "has_update=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  无更新，跳过"
+          fi
+
+      # ========== 4. 提取版本号（从本地最新代码读取） ==========
+      - name: 提取最新版本号
+        if: steps.sync.outputs.has_update == 'true'
+        id: extract_version
+        run: |
+          # 强制倒序读取，精准匹配版本号
+          FRONT_VER=$(tac Update.log | grep -m1 -oP '前端[:：]?\s*v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+          BACK_VER=$(tac Update.log | grep -m1 -oP '后端[:：]\s*v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+          
+          # 补全v前缀，兜底为时间戳
+          FRONT_VERSION=${FRONT_VER:+"v$FRONT_VER"}
+          BACK_VERSION=${BACK_VER:+"v$BACK_VER"}
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          FRONT_VERSION=${FRONT_VERSION:-"v$TIMESTAMP"}
+          BACK_VERSION=${BACK_VERSION:-"v$TIMESTAMP"}
+
+          echo "✅ 最终版本号：前端=$FRONT_VERSION | 后端=$BACK_VERSION"
+          echo "front_version=$FRONT_VERSION" >> $GITHUB_OUTPUT
+          echo "back_version=$BACK_VERSION" >> $GITHUB_OUTPUT
+
+      # ========== 5. 登录DockerHub ==========
+      - name: 登录DockerHub
+        if: steps.sync.outputs.has_update == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ========== 6. 清理Docker缓存 ==========
+      - name: 清理Docker缓存
+        if: steps.sync.outputs.has_update == 'true'
+        run: |
+          docker system prune -af
+          echo "✅ Docker缓存已清空"
+
+      # ========== 7. 构建推送（从本地最新代码构建） ==========
+      - name: 构建推送最新镜像
+        if: steps.sync.outputs.has_update == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .  # 本地同步后的最新代码目录
+          file: ./core/Dockerfile
+          push: true
+          # 生成3个标签：latest + 版本号 + 时间戳（确保唯一）
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.extract_version.outputs.front_version }}-${{ steps.extract_version.outputs.back_version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.extract_version.outputs.front_version }}-${{ steps.extract_version.outputs.back_version }}-${{ github.run_id }}
+          platforms: linux/amd64
+          no-cache: true
+          pull: true
+          provenance: false
+          sbom: false
