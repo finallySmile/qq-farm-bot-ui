@@ -1,130 +1,175 @@
-name: Auto Sync & Build Docker
+name: Auto Build QQ Farm Bot UI - Backend Only (Update.log Required)
 
 on:
   schedule:
-    - cron: '1 */12 * * *'
-  workflow_dispatch:
+    - cron: '0 */6 * * *'
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: '强制构建'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+  push:
+    branches: [ main ]
 
 jobs:
-  sync-and-build:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # 仅保留代码读写权限，无需workflows权限
+    timeout-minutes: 45
+
     steps:
-      # ========== 1. 提前备份工作流文件（仓库外，永不丢失） ==========
-      - name: 备份工作流文件（仓库外）
-        run: |
-          # 直接从GitHub API下载工作流文件（无需克隆仓库，规避权限）
-          mkdir -p /tmp/workflow-backup
-          curl -s -H "Authorization: token ${{ github.token }}" \
-            https://raw.githubusercontent.com/finallySmile/qq-farm-bot-ui/main/.github/workflows/Auto-Sync-Build-Docker.yml \
-            -o /tmp/workflow-backup/Auto-Sync-Build-Docker.yml || echo "⚠️ 工作流文件备份失败（首次创建可忽略）"
-          echo "✅ 工作流文件已备份到 /tmp/workflow-backup"
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      # ========== 2. 检出代码（强制清理旧文件） ==========
-      - name: 检出main分支代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: main
-          persist-credentials: true
-          clean: true
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-      # ========== 3. 同步上游代码（核心：同步后立即恢复工作流文件，不推送） ==========
-      - name: 同步上游最新代码
-        id: sync
-        run: |
-          # 配置Git
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
-
-          # 安全处理upstream远程
-          if git remote | grep -q "upstream"; then
-            git remote rm upstream
-          fi
+    - name: Sync with upstream (Get latest code)
+      run: |
+        if ! git remote | grep -q upstream; then
           git remote add upstream https://github.com/Penty-d/qq-farm-bot-ui.git
-          git fetch upstream main --force --prune
+        fi
+        git fetch upstream main
+        git reset --hard upstream/main
 
-          # 获取最新commit
-          LOCAL_COMMIT=$(git rev-parse HEAD)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
-          
-          echo "📝 本地Commit: $LOCAL_COMMIT | 上游Commit: $UPSTREAM_COMMIT"
+    - name: Check for backend updates only
+      id: check
+      run: |
+        # 获取当前提交哈希（同步上游后的）
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        echo "当前提交: $CURRENT_COMMIT"
 
-          # 同步最新代码（仅本地同步，不推送）
-          if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
-            git reset --hard $UPSTREAM_COMMIT
-            git clean -fdx  # 彻底删除所有旧文件
-            
-            # 关键：同步后立即恢复工作流文件（本地，不推送）
-            mkdir -p .github/workflows/
-            cp /tmp/workflow-backup/Auto-Sync-Build-Docker.yml .github/workflows/ || echo "⚠️ 工作流文件恢复失败（首次创建可忽略）"
-            
+        # 获取远程分支的最新提交
+        git fetch origin main
+        ORIGIN_COMMIT=$(git rev-parse origin/main)
+        echo "远程提交: $ORIGIN_COMMIT"
+
+        # 比较两个提交是否相同
+        if [ "$CURRENT_COMMIT" = "$ORIGIN_COMMIT" ]; then
+          echo "❌ 代码没有变更，跳过构建"
+          echo "has_update=false" >> $GITHUB_OUTPUT
+        else
+          # 检查是否有后端目录的变更
+          git fetch upstream main
+          echo "检查后端目录 (core/) 的变更..."
+
+          # 获取当前提交和远程提交之间的差异
+          git diff --name-only origin/main..upstream/main -- core/ > /tmp/backend_changes.txt
+
+          if [ -s /tmp/backend_changes.txt ]; then
+            echo "✅ 检测到后端代码变更，开始构建"
+            echo "变更的文件:"
+            cat /tmp/backend_changes.txt
             echo "has_update=true" >> $GITHUB_OUTPUT
-            echo "✅ 已同步上游最新代码（本地），并恢复工作流文件"
-            
-            # 打印Update.log完整内容（验证）
-            echo "📝 同步后Update.log完整内容："
-            cat Update.log || echo "⚠️ Update.log不存在"
           else
+            echo "⚠️  只有前端或其他目录变更，跳过后端构建"
             echo "has_update=false" >> $GITHUB_OUTPUT
-            echo "ℹ️  无更新，跳过"
+          fi
+        fi
+
+    - name: Get version from Update.log (Backend only)
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      id: version
+      run: |
+        UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
+
+        echo "尝试从Update.log获取后端版本号..."
+        echo "URL: $UPDATE_LOG_URL"
+
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$UPDATE_LOG_URL")
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "✅ Update.log文件存在 (HTTP $HTTP_CODE)"
+
+          # 只获取后端版本号
+          VERSION=$(curl -s "$UPDATE_LOG_URL" | \
+            grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
+            head -1)
+
+          if [ -z "$VERSION" ]; then
+            echo "❌ 无法从Update.log提取后端版本号"
+            echo "Update.log内容:"
+            curl -s "$UPDATE_LOG_URL" | head -10
+            exit 1
           fi
 
-      # ========== 4. 提取版本号（从本地最新代码读取） ==========
-      - name: 提取最新版本号
-        if: steps.sync.outputs.has_update == 'true'
-        id: extract_version
-        run: |
-          # 强制倒序读取，精准匹配版本号
-          FRONT_VER=$(tac Update.log | grep -m1 -oP '前端[:：]?\s*v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-          BACK_VER=$(tac Update.log | grep -m1 -oP '后端[:：]\s*v\K[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-          
-          # 补全v前缀，兜底为时间戳
-          FRONT_VERSION=${FRONT_VER:+"v$FRONT_VER"}
-          BACK_VERSION=${BACK_VER:+"v$BACK_VER"}
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
-          FRONT_VERSION=${FRONT_VERSION:-"v$TIMESTAMP"}
-          BACK_VERSION=${BACK_VERSION:-"v$TIMESTAMP"}
+          echo "✅ 从Update.log获取后端版本: $VERSION"
+        else
+          echo "❌ Update.log文件不存在或无法访问 (HTTP $HTTP_CODE)"
+          echo "跳过构建，不更新Docker镜像"
+          exit 1
+        fi
 
-          echo "✅ 最终版本号：前端=$FRONT_VERSION | 后端=$BACK_VERSION"
-          echo "front_version=$FRONT_VERSION" >> $GITHUB_OUTPUT
-          echo "back_version=$BACK_VERSION" >> $GITHUB_OUTPUT
+        BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+        FULL_VERSION="${VERSION}-${BUILD_TIME}"
 
-      # ========== 5. 登录DockerHub ==========
-      - name: 登录DockerHub
-        if: steps.sync.outputs.has_update == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "full_version=$FULL_VERSION" >> $GITHUB_OUTPUT
+        echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
 
-      # ========== 6. 清理Docker缓存 ==========
-      - name: 清理Docker缓存
-        if: steps.sync.outputs.has_update == 'true'
-        run: |
-          docker system prune -af
-          echo "✅ Docker缓存已清空"
+    - name: Login to Docker Hub
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ========== 7. 构建推送（从本地最新代码构建） ==========
-      - name: 构建推送最新镜像
-        if: steps.sync.outputs.has_update == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context: .  # 本地同步后的最新代码目录
-          file: ./core/Dockerfile
-          push: true
-          # 生成3个标签：latest + 版本号 + 时间戳（确保唯一）
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.extract_version.outputs.front_version }}-${{ steps.extract_version.outputs.back_version }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/qq-farm-bot-ui:${{ steps.extract_version.outputs.front_version }}-${{ steps.extract_version.outputs.back_version }}-${{ github.run_id }}
-          platforms: linux/amd64
-          no-cache: true
-          pull: true
-          provenance: false
-          sbom: false
+    - name: Build and push Docker image (Backend only)
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./core/Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.full_version }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64
+        build-args: |
+          APP_VERSION=${{ steps.version.outputs.full_version }}
+
+    - name: Create Git Tag (Skip if exists)
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      run: |
+        # 确定版本号
+        VERSION_TO_TAG="${{ steps.version.outputs.version }}"
+
+        # 配置Git
+        git config --global user.name 'github-actions'
+        git config --global user.email 'actions@github.com'
+
+        # 创建标签（格式：v版本号）
+        TAG_NAME="v${VERSION_TO_TAG}"
+        echo "检查标签是否存在: $TAG_NAME"
+
+        # 检查远程仓库是否已存在该标签
+        if git ls-remote --tags origin | grep -q "refs/tags/${TAG_NAME}$"; then
+          echo "⚠️  远程标签 $TAG_NAME 已存在，跳过创建。"
+          echo "版本: $VERSION_TO_TAG"
+          echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
+        else
+          echo "创建Git标签: $TAG_NAME"
+          # 创建并推送标签
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+          echo "✅ Git标签已创建并推送: $TAG_NAME"
+          echo "版本: $VERSION_TO_TAG"
+          echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
+        fi
+
+    - name: Notification
+      if: steps.check.outputs.has_update == 'true' || github.event.inputs.force_build == 'true'
+      run: |
+        echo "✅ 后端构建完成！"
+        echo "版本: ${{ steps.version.outputs.full_version }}"
+        echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
