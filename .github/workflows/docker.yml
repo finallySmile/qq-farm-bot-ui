@@ -1,11 +1,9 @@
-name: 自动构建QQ农场机器人UI - 后端优化版
+name: 自动构建QQ农场机器人UI - 后端优化版（修复镜像问题）
 
 on:
-  # 定时检测：每12小时一次
   schedule:
     - cron: '0 */12 * * *'
 
-  # 手动触发：支持常规构建和紧急构建
   workflow_dispatch:
     inputs:
       build_type:
@@ -17,7 +15,6 @@ on:
           - 'normal'        # 常规构建：检查代码变更
           - 'emergency'     # 紧急构建：跳过所有检查，强制构建
 
-  # 代码推送触发：当主分支有变更时
   push:
     branches: [ main ]
 
@@ -48,7 +45,6 @@ jobs:
       env:
         BUILD_TYPE: ${{ github.event.inputs.build_type }}
       run: |
-        # 检查构建类型
         if [ "$BUILD_TYPE" = "emergency" ]; then
           echo "🚨 紧急构建模式：跳过所有检查，直接构建"
           echo "has_update=true" >> $GITHUB_OUTPUT
@@ -56,26 +52,21 @@ jobs:
           exit 0
         fi
 
-        # 获取当前提交哈希（同步上游后的）
         CURRENT_COMMIT=$(git rev-parse HEAD)
         echo "当前提交: $CURRENT_COMMIT"
 
-        # 获取远程分支的最新提交
         git fetch origin main
         ORIGIN_COMMIT=$(git rev-parse origin/main)
         echo "远程提交: $ORIGIN_COMMIT"
 
-        # 比较两个提交是否相同
         if [ "$CURRENT_COMMIT" = "$ORIGIN_COMMIT" ]; then
           echo "❌ 代码没有变更，跳过构建"
           echo "has_update=false" >> $GITHUB_OUTPUT
           echo "reason=no_change" >> $GITHUB_OUTPUT
         else
-          # 检查是否有任何代码变更（不限于core/目录）
           git fetch upstream main
           echo "检查代码变更..."
 
-          # 获取当前提交和远程提交之间的所有差异
           git diff --name-only origin/main..upstream/main > /tmp/all_changes.txt
 
           if [ -s /tmp/all_changes.txt ]; then
@@ -107,7 +98,6 @@ jobs:
         if [ "$HTTP_CODE" = "200" ]; then
           echo "✅ Update.log文件存在 (HTTP $HTTP_CODE)"
 
-          # 只获取后端版本号
           BASE_VERSION=$(curl -s "$UPDATE_LOG_URL" | \
             grep -oP "后端：v\K[0-9]+\.[0-9]+\.[0-9]+" | \
             head -1)
@@ -126,20 +116,15 @@ jobs:
           exit 1
         fi
 
-        # 智能版本策略：只有版本号变化时才创建新版本，否则使用 -fixed 后缀
         if [ "$BUILD_TYPE" = "emergency" ]; then
-          # 紧急构建时，总是使用基础版本号（不带-fixed）
           FINAL_VERSION="$BASE_VERSION"
           echo "紧急构建模式：使用基础版本 $FINAL_VERSION"
         else
-          # 检查是否已存在该版本号的镜像（通过Git标签）
           git fetch --tags
           if git tag | grep -q "^v${BASE_VERSION}$"; then
-            # 版本号已存在，使用-fixed后缀
             FINAL_VERSION="${BASE_VERSION}-fixed"
             echo "版本号 $BASE_VERSION 已存在，使用-fixed版本: $FINAL_VERSION"
           else
-            # 版本号不存在，使用基础版本号
             FINAL_VERSION="$BASE_VERSION"
             echo "版本号 $BASE_VERSION 不存在，使用基础版本: $FINAL_VERSION"
           fi
@@ -148,7 +133,6 @@ jobs:
         echo "version=$FINAL_VERSION" >> $GITHUB_OUTPUT
         echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
 
-        # 保存当前版本号到文件（用于下次比较）
         mkdir -p .github/workflows
         echo "$BASE_VERSION" > .github/workflows/last_version.txt
 
@@ -159,7 +143,7 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: 构建并推送Docker镜像（仅后端）
+    - name: 构建并推送Docker镜像（优化版 - 避免多余镜像）
       if: steps.check.outputs.has_update == 'true'
       uses: docker/build-push-action@v5
       with:
@@ -169,9 +153,11 @@ jobs:
         tags: |
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
           ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # 移除缓存配置，避免生成中间镜像
+        # 只构建单架构，不生成多架构清单
         platforms: linux/amd64
+        # 控制输出类型
+        outputs: type=image
         build-args: |
           APP_VERSION=${{ steps.version.outputs.version }}
 
@@ -180,14 +166,11 @@ jobs:
       run: |
         VERSION_TO_TAG="${{ steps.version.outputs.version }}"
 
-        # 配置Git
         git config --global user.name 'github-actions'
         git config --global user.email 'actions@github.com'
 
-        # 创建标签（格式：v版本号）
         TAG_NAME="v${VERSION_TO_TAG}"
 
-        # 检查远程标签是否存在
         if git ls-remote --tags origin | grep -q "refs/tags/${TAG_NAME}$"; then
           echo "⚠️  远程标签 $TAG_NAME 已存在，跳过创建。"
         else
@@ -209,15 +192,12 @@ jobs:
       run: |
         echo "开始清理旧的Docker镜像..."
 
-        # 获取所有镜像标签（排除latest和当前版本）
         ALL_TAGS=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
           "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags?page_size=100" | \
           jq -r '.results[].name')
 
-        # 过滤出版本号标签（格式：X.X.X 或 X.X.X-fixed）
         VERSION_TAGS=$(echo "$ALL_TAGS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-fixed)?$')
 
-        # 排序并保留最近10个版本（按版本号降序）
         KEEP_COUNT=10
         TAGS_TO_KEEP=$(echo "$VERSION_TAGS" | sort -V -r | head -n $KEEP_COUNT)
         TAGS_TO_DELETE=$(echo "$VERSION_TAGS" | sort -V -r | tail -n +$((KEEP_COUNT + 1)))
@@ -228,7 +208,6 @@ jobs:
         echo "要删除的旧版本:"
         echo "$TAGS_TO_DELETE"
 
-        # 删除旧镜像
         if [ -n "$TAGS_TO_DELETE" ]; then
           for TAG in $TAGS_TO_DELETE; do
             echo "删除旧镜像: $TAG"
@@ -256,7 +235,6 @@ jobs:
         echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
         echo "最新镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
 
-        # 如果是紧急构建，发送特殊提示
         if [ "$BUILD_TYPE" = "emergency" ]; then
           echo "🚨 紧急构建完成，镜像已更新！"
         fi
