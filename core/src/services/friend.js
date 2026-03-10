@@ -5,11 +5,11 @@
 const { CONFIG, PlantPhase, PHASE_NAMES } = require('../config/config');
 const { getPlantName, getPlantById, getSeedImageBySeedId } = require('../config/gameConfig');
 const { parentPort } = require('node:worker_threads');
-const { isAutomationOn, getFriendQuietHours, getFriendBlacklist } = require('../models/store');
+const { isAutomationOn, getFriendQuietHours, getFriendBlacklist, getAutomation } = require('../models/store');
 const { sendMsgAsync, getUserState, networkEvents } = require('../utils/network');
 const { types } = require('../utils/proto');
 const { toLong, toNum, toTimeSec, getServerTimeSec, log, logWarn, sleep } = require('../utils/utils');
-const { getCurrentPhase, setOperationLimitsCallback } = require('./farm');
+const { getCurrentPhase, setOperationLimitsCallback, buildLandMap, getDisplayLandContext, isOccupiedSlaveLand } = require('./farm');
 const { createScheduler } = require('./scheduler');
 const { recordOperation } = require('./stats');
 const { sellAllFruits } = require('./warehouse');
@@ -20,6 +20,14 @@ let friendLoopRunning = false;
 let externalSchedulerMode = false;
 let lastResetDate = '';  // 上次重置日期 (YYYY-MM-DD)
 const friendScheduler = createScheduler('friend');
+let idleFriendProbeCursor = 0;
+const idleFriendProbeCooldownUntil = new Map();
+
+const IDLE_FRIEND_PROBE_BATCH_SIZE = 12;
+const IDLE_FRIEND_PROBE_REDUCED_BATCH_SIZE = 6;
+const IDLE_FRIEND_PROBE_SKIP_THRESHOLD = 24;
+const IDLE_FRIEND_PROBE_MISS_COOLDOWN_MS = 20 * 60 * 1000;
+const IDLE_FRIEND_PROBE_HIT_COOLDOWN_MS = 2 * 60 * 1000;
 
 // 操作限制状态 (从服务器响应中更新)
 // 操作类型ID (根据游戏代码):
@@ -41,6 +49,23 @@ const OP_NAMES = {
 
 let canGetHelpExp = true;
 let helpAutoDisabledByLimit = false;
+
+function normalizeStealPlantBlacklist(input) {
+    const source = Array.isArray(input) ? input : [];
+    const normalized = [];
+    for (const item of source) {
+        const value = Number.parseInt(item, 10);
+        if (!Number.isFinite(value) || value <= 0) continue;
+        if (normalized.includes(value)) continue;
+        normalized.push(value);
+    }
+    return normalized;
+}
+
+function getStealPlantBlacklistSet() {
+    const automation = getAutomation() || {};
+    return new Set(normalizeStealPlantBlacklist(automation.friend_steal_blacklist));
+}
 
 function parseTimeToMinutes(timeStr) {
     const m = String(timeStr || '').match(/^(\d{1,2}):(\d{1,2})$/);
@@ -109,6 +134,58 @@ function addFriendToBlacklist(friendGid, friendName, reason = '') {
         reason: String(reason || ''),
     });
     return true;
+}
+
+function pruneIdleFriendProbeCooldown(nowMs = Date.now()) {
+    for (const [gid, until] of idleFriendProbeCooldownUntil.entries()) {
+        if (!gid || until <= nowMs) idleFriendProbeCooldownUntil.delete(gid);
+    }
+}
+
+function getIdleFriendProbeBudget(priorityCount) {
+    const count = Math.max(0, Number(priorityCount) || 0);
+    if (count >= IDLE_FRIEND_PROBE_SKIP_THRESHOLD) return 0;
+    if (count >= Math.floor(IDLE_FRIEND_PROBE_SKIP_THRESHOLD / 2)) return IDLE_FRIEND_PROBE_REDUCED_BATCH_SIZE;
+    return IDLE_FRIEND_PROBE_BATCH_SIZE;
+}
+
+function selectIdleFriendProbeCandidates(candidates, budget, nowMs = Date.now()) {
+    const list = Array.isArray(candidates) ? candidates : [];
+    const maxCount = Math.max(0, Number(budget) || 0);
+    if (list.length === 0 || maxCount <= 0) return [];
+
+    pruneIdleFriendProbeCooldown(nowMs);
+
+    const total = list.length;
+    let cursor = idleFriendProbeCursor % total;
+    if (cursor < 0) cursor = 0;
+
+    const selected = [];
+    let scanned = 0;
+    while (scanned < total && selected.length < maxCount) {
+        const friend = list[cursor];
+        if (friend) {
+            const gid = toNum(friend.gid);
+            const cooldownUntil = gid ? (idleFriendProbeCooldownUntil.get(gid) || 0) : 0;
+            if (!gid || cooldownUntil <= nowMs) {
+                selected.push({ ...friend, isProbe: true });
+            }
+        }
+        cursor = (cursor + 1) % total;
+        scanned++;
+    }
+
+    idleFriendProbeCursor = cursor;
+    return selected;
+}
+
+function markIdleFriendProbeCooldown(friendGid, hadAction, nowMs = Date.now()) {
+    const gid = toNum(friendGid);
+    if (!gid) return;
+    idleFriendProbeCooldownUntil.set(
+        gid,
+        nowMs + (hadAction ? IDLE_FRIEND_PROBE_HIT_COOLDOWN_MS : IDLE_FRIEND_PROBE_MISS_COOLDOWN_MS)
+    );
 }
 
 // ============ 好友 API ============
@@ -423,7 +500,9 @@ async function checkCanOperateRemote(friendGid, operationId) {
 
 // ============ 好友土地分析 ============
 
-function analyzeFriendLands(lands, myGid, friendName = '') {
+function analyzeFriendLands(lands, myGid, friendName = '', options = {}) {
+    const stealPlantBlacklistSet = options.stealPlantBlacklistSet instanceof Set ? options.stealPlantBlacklistSet : null;
+
     const result = {
         stealable: [],   // 可偷
         stealableInfo: [],  // 可偷植物信息 { landId, plantId, name }
@@ -434,8 +513,14 @@ function analyzeFriendLands(lands, myGid, friendName = '') {
         canPutBug: [],   // 可以放虫
     };
 
+    const landsMap = buildLandMap(lands);
+
     for (const land of lands) {
         const id = toNum(land.id);
+        if (isOccupiedSlaveLand(land, landsMap)) {
+            continue;
+        }
+
         const plant = land.plant;
 
         if (!plant || !plant.phases || plant.phases.length === 0) {
@@ -450,8 +535,11 @@ function analyzeFriendLands(lands, myGid, friendName = '') {
 
         if (phaseVal === PlantPhase.MATURE) {
             if (plant.stealable) {
-                result.stealable.push(id);
                 const plantId = toNum(plant.id);
+                if (stealPlantBlacklistSet && plantId > 0 && stealPlantBlacklistSet.has(plantId)) {
+                    continue;
+                }
+                result.stealable.push(id);
                 const plantName = getPlantName(plantId) || plant.name || '未知';
                 result.stealableInfo.push({ landId: id, plantId, name: plantName });
             }
@@ -530,10 +618,17 @@ async function getFriendLandsDetail(friendGid) {
 
         const landsList = [];
         const nowSec = getServerTimeSec();
+        const landsMap = buildLandMap(lands);
         for (const land of lands) {
             const id = toNum(land.id);
             const level = toNum(land.level);
             const unlocked = !!land.unlocked;
+            const {
+                sourceLand,
+                occupiedByMaster,
+                masterLandId,
+                occupiedLandIds,
+            } = getDisplayLandContext(land, landsMap);
             if (!unlocked) {
                 landsList.push({
                     id,
@@ -545,17 +640,43 @@ async function getFriendLandsDetail(friendGid) {
                     needWater: false,
                     needWeed: false,
                     needBug: false,
+                    occupiedByMaster: false,
+                    masterLandId: 0,
+                    occupiedLandIds: [],
+                    plantSize: 1,
                 });
                 continue;
             }
-            const plant = land.plant;
+            const plant = sourceLand && sourceLand.plant;
             if (!plant || !plant.phases || plant.phases.length === 0) {
-                landsList.push({ id, unlocked: true, status: 'empty', plantName: '', phaseName: '空地', level });
+                landsList.push({
+                    id,
+                    unlocked: true,
+                    status: 'empty',
+                    plantName: '',
+                    phaseName: '空地',
+                    level,
+                    occupiedByMaster,
+                    masterLandId,
+                    occupiedLandIds,
+                    plantSize: 1,
+                });
                 continue;
             }
             const currentPhase = getCurrentPhase(plant.phases, false, '');
             if (!currentPhase) {
-                landsList.push({ id, unlocked: true, status: 'empty', plantName: '', phaseName: '', level });
+                landsList.push({
+                    id,
+                    unlocked: true,
+                    status: 'empty',
+                    plantName: '',
+                    phaseName: '',
+                    level,
+                    occupiedByMaster,
+                    masterLandId,
+                    occupiedLandIds,
+                    plantSize: 1,
+                });
                 continue;
             }
             const phaseVal = currentPhase.phase;
@@ -564,6 +685,7 @@ async function getFriendLandsDetail(friendGid) {
             const plantCfg = getPlantById(plantId);
             const seedId = toNum(plantCfg && plantCfg.seed_id);
             const seedImage = seedId > 0 ? getSeedImageBySeedId(seedId) : '';
+            const plantSize = Math.max(1, toNum(plantCfg && plantCfg.size) || 1);
             const phaseName = PHASE_NAMES[phaseVal] || '';
             const maturePhase = Array.isArray(plant.phases)
                 ? plant.phases.find((p) => p && toNum(p.phase) === PlantPhase.MATURE)
@@ -587,6 +709,10 @@ async function getFriendLandsDetail(friendGid) {
                 needWater: toNum(plant.dry_num) > 0,
                 needWeed: (plant.weed_owners && plant.weed_owners.length > 0),
                 needBug: (plant.insect_owners && plant.insect_owners.length > 0),
+                occupiedByMaster,
+                masterLandId,
+                occupiedLandIds,
+                plantSize,
             });
         }
 
@@ -740,7 +866,7 @@ async function doFriendOperation(friendGid, opType) {
 
 // ============ 拜访好友 ============
 
-async function visitFriend(friend, totalActions, myGid) {
+async function visitFriend(friend, totalActions, myGid, options = {}) {
     const { gid, name } = friend;
 
     let enterReply;
@@ -749,21 +875,21 @@ async function visitFriend(friend, totalActions, myGid) {
     } catch (e) {
         if (isEnterFarmBannedError(e)) {
             addFriendToBlacklist(gid, name, e && e.message ? e.message : '');
-            return;
+            return { acted: false, entered: false };
         }
         logWarn('好友', `进入 ${name} 农场失败: ${e.message}`, {
             module: 'friend', event: 'enter_farm', result: 'error', friendName: name, friendGid: gid
         });
-        return;
+        return { acted: false, entered: false };
     }
 
     const lands = enterReply.lands || [];
     if (lands.length === 0) {
         await leaveFriendFarm(gid);
-        return;
+        return { acted: false, entered: true };
     }
 
-    const status = analyzeFriendLands(lands, myGid, name);
+    const status = analyzeFriendLands(lands, myGid, name, options);
 
     // 执行操作
     const actions = [];
@@ -863,11 +989,12 @@ async function visitFriend(friend, totalActions, myGid) {
 
     if (actions.length > 0) {
         log('好友', `${name}: ${actions.join('/')}`, {
-            module: 'friend', event: 'visit_friend', result: 'ok', friendName: name, friendGid: gid, actions
+            module: 'friend', event: 'visit_friend', result: 'ok', friendName: name, friendGid: gid, actions, scanType: friend && friend.isProbe ? 'probe' : 'priority'
         });
     }
 
     await leaveFriendFarm(gid);
+    return { acted: actions.length > 0, entered: true };
 }
 
 // ============ 好友巡查主循环 ============
@@ -878,9 +1005,11 @@ async function checkFriends() {
     if (!isAutomationOn('friend')) return false;
 
     const helpEnabled = !!isAutomationOn('friend_help');
+    const stopWhenExpLimit = !!isAutomationOn('friend_help_exp_limit');
+    const helpScanEnabled = helpEnabled && (!stopWhenExpLimit || canGetHelpExp);
     const stealEnabled = !!isAutomationOn('friend_steal');
     const badEnabled = !!isAutomationOn('friend_bad');
-    const hasAnyFriendOp = helpEnabled || stealEnabled || badEnabled;
+    const hasAnyFriendOp = helpScanEnabled || stealEnabled || badEnabled;
     if (isCheckingFriends || !state.gid || !hasAnyFriendOp) return false;
     if (inFriendQuietHours()) return false;
     
@@ -900,7 +1029,7 @@ async function checkFriends() {
         const blacklist = new Set(getFriendBlacklist());
 
         const priorityFriends = [];
-        const otherFriends = [];
+        const idleProbeCandidates = [];
         const visitedGids = new Set();
 
         for (const f of friends) {
@@ -917,16 +1046,17 @@ async function checkFriends() {
             const weedNum = p ? toNum(p.weed_num) : 0;
             const insectNum = p ? toNum(p.insect_num) : 0;
             
-            const hasAction = stealNum > 0 || dryNum > 0 || weedNum > 0 || insectNum > 0;
+            const hasStealAction = stealEnabled && stealNum > 0;
+            const hasHelpAction = helpScanEnabled && (dryNum > 0 || weedNum > 0 || insectNum > 0);
 
-            if (hasAction) {
+            if (hasStealAction || hasHelpAction) {
                 priorityFriends.push({ 
                     gid, name, isPriority: true,
                     stealNum, dryNum, weedNum, insectNum // 保存状态用于排序
                 });
                 visitedGids.add(gid);
-            } else if ((autoBadEnabled && canPutBugOrWeed) || helpEnabled || stealEnabled) {
-                otherFriends.push({ gid, name, isPriority: false });
+            } else if ((autoBadEnabled && canPutBugOrWeed) || helpScanEnabled || stealEnabled) {
+                idleProbeCandidates.push({ gid, name, isPriority: false });
                 visitedGids.add(gid);
             }
         }
@@ -940,26 +1070,35 @@ async function checkFriends() {
             return helpB - helpA;
         });
 
-        const friendsToVisit = [...priorityFriends, ...otherFriends];
+        const idleProbeBudget = getIdleFriendProbeBudget(priorityFriends.length);
+        const probeFriends = selectIdleFriendProbeCandidates(idleProbeCandidates, idleProbeBudget);
+        const friendsToVisit = [...priorityFriends, ...probeFriends];
 
         if (friendsToVisit.length === 0) {
             return false;
         }
 
         const totalActions = { steal: 0, water: 0, weed: 0, bug: 0, putBug: 0, putWeed: 0 };
+        const stealPlantBlacklistSet = getStealPlantBlacklistSet();
+        let visitedCount = 0;
+        let probeVisitedCount = 0;
 
         for (let i = 0; i < friendsToVisit.length; i++) {
             const friend = friendsToVisit[i];
             
-            // 如果是仅捣乱的好友（帮忙/偷菜均未开启），且次数已用完，则停止
-            if (!friend.isPriority && !helpEnabled && !stealEnabled && !canOperate(10004) && !canOperate(10003)) {
-                break;
-            }
-
             try {
-                await visitFriend(friend, totalActions, state.gid);
+                const result = await visitFriend(friend, totalActions, state.gid, { stealPlantBlacklistSet });
+                visitedCount++;
+                if (friend && friend.isProbe) {
+                    probeVisitedCount++;
+                    markIdleFriendProbeCooldown(friend.gid, !!(result && result.acted));
+                }
             } catch {
                 // 单个好友访问失败不影响整体
+                if (friend && friend.isProbe) {
+                    probeVisitedCount++;
+                    markIdleFriendProbeCooldown(friend.gid, false);
+                }
             }
             
             // 稍微等待，避免请求过快
@@ -986,7 +1125,7 @@ async function checkFriends() {
         
         if (summary.length > 0) {
             log('好友', `巡查 ${friendsToVisit.length} 人 → ${summary.join('/')}`, {
-                module: 'friend', event: 'friend_cycle', result: 'ok', visited: friendsToVisit.length, summary
+                module: 'friend', event: 'friend_cycle', result: 'ok', visited: visitedCount, previewTargets: priorityFriends.length, probeTargets: probeFriends.length, probed: probeVisitedCount, summary
             });
         }
         return summary.length > 0;
@@ -1033,6 +1172,8 @@ function startFriendCheckLoop(options = {}) {
 function stopFriendCheckLoop() {
     friendLoopRunning = false;
     externalSchedulerMode = false;
+    idleFriendProbeCursor = 0;
+    idleFriendProbeCooldownUntil.clear();
     networkEvents.off('friendApplicationReceived', onFriendApplicationReceived);
     friendScheduler.clearAll();
 }
