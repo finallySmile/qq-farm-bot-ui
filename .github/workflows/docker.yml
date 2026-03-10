@@ -1,4 +1,4 @@
-name: 自动构建QQ农场机器人UI - 后端优化版（修复镜像问题）
+name: 自动构建QQ农场机器人UI - 后端优化版（彻底修复镜像问题）
 
 on:
   schedule:
@@ -29,8 +29,11 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: 设置Docker构建环境
-      uses: docker/setup-buildx-action@v3
+    - name: 设置Docker环境
+      run: |
+        # 确保Docker可用
+        docker --version
+        echo "Docker环境就绪"
 
     - name: 同步上游代码（获取最新代码）
       run: |
@@ -138,28 +141,59 @@ jobs:
 
     - name: 登录Docker Hub
       if: steps.check.outputs.has_update == 'true'
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        if [ $? -eq 0 ]; then
+          echo "✅ Docker Hub登录成功"
+        else
+          echo "❌ Docker Hub登录失败"
+          exit 1
+        fi
 
-    - name: 构建并推送Docker镜像（优化版 - 避免多余镜像）
+    - name: 构建并推送Docker镜像（直接使用docker命令）
       if: steps.check.outputs.has_update == 'true'
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./core/Dockerfile
-        push: true
-        tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}
-        # 移除缓存配置，避免生成中间镜像
-        # 只构建单架构，不生成多架构清单
-        platforms: linux/amd64
-        # 控制输出类型
-        outputs: type=image
-        build-args: |
-          APP_VERSION=${{ steps.version.outputs.version }}
+      env:
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        echo "=== 开始构建Docker镜像 ==="
+        echo "版本: $VERSION"
+        echo "镜像标签: ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION}"
+
+        # 清理可能存在的旧镜像
+        docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest 2>/dev/null || true
+        docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} 2>/dev/null || true
+
+        # 构建镜像
+        echo "构建镜像..."
+        docker build \
+          --build-arg APP_VERSION=${VERSION} \
+          -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest \
+          -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} \
+          -f ./core/Dockerfile .
+
+        if [ $? -ne 0 ]; then
+          echo "❌ Docker构建失败"
+          exit 1
+        fi
+
+        echo "✅ Docker构建成功"
+        echo "镜像大小:"
+        docker images | grep ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}
+
+        # 推送镜像
+        echo "推送镜像到Docker Hub..."
+        docker push ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest
+        docker push ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION}
+
+        if [ $? -ne 0 ]; then
+          echo "❌ Docker推送失败"
+          exit 1
+        fi
+
+        echo "✅ 镜像推送成功"
+        echo "=== 构建完成 ==="
 
     - name: 创建Git标签（仅新版本）
       if: steps.check.outputs.has_update == 'true' && !contains(steps.version.outputs.version, '-fixed')
