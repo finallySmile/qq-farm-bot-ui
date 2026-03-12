@@ -1,4 +1,4 @@
-name: 自动构建QQ农场机器人UI - 后端优化版（解决镜像重复问题）
+name: 自动构建QQ农场机器人UI - 后端优化版（完整优化版）
 
 on:
   schedule:
@@ -49,10 +49,16 @@ jobs:
       env:
         BUILD_TYPE: ${{ github.event.inputs.build_type }}
       run: |
+        echo "========================================"
+        echo "开始检查代码变更"
+        echo "构建类型: $BUILD_TYPE"
+        echo "========================================"
+
         if [ "$BUILD_TYPE" = "emergency" ]; then
           echo "🚨 紧急构建模式：跳过所有检查，直接构建"
           echo "has_update=true" >> $GITHUB_OUTPUT
           echo "reason=emergency_build" >> $GITHUB_OUTPUT
+          echo "✅ 设置紧急构建标志"
           exit 0
         fi
 
@@ -67,6 +73,7 @@ jobs:
           echo "❌ 代码没有变更，跳过构建"
           echo "has_update=false" >> $GITHUB_OUTPUT
           echo "reason=no_change" >> $GITHUB_OUTPUT
+          echo "✅ 设置跳过构建标志"
         else
           git fetch upstream main
           echo "检查代码变更..."
@@ -79,12 +86,18 @@ jobs:
             cat /tmp/all_changes.txt
             echo "has_update=true" >> $GITHUB_OUTPUT
             echo "reason=code_change" >> $GITHUB_OUTPUT
+            echo "✅ 设置构建标志"
           else
             echo "⚠️  代码没有变更，跳过构建"
             echo "has_update=false" >> $GITHUB_OUTPUT
             echo "reason=no_change" >> $GITHUB_OUTPUT
+            echo "✅ 设置跳过构建标志"
           fi
         fi
+
+        echo "========================================"
+        echo "检查代码变更完成"
+        echo "========================================"
 
     - name: 从Update.log获取版本号（智能版本管理）
       if: steps.check.outputs.has_update == 'true'
@@ -92,6 +105,10 @@ jobs:
       env:
         BUILD_TYPE: ${{ github.event.inputs.build_type }}
       run: |
+        echo "========================================"
+        echo "获取版本号"
+        echo "========================================"
+
         UPDATE_LOG_URL="https://raw.githubusercontent.com/Penty-d/qq-farm-bot-ui/main/Update.log"
 
         echo "尝试从Update.log获取后端版本号..."
@@ -140,6 +157,10 @@ jobs:
         mkdir -p .github/workflows
         echo "$BASE_VERSION" > .github/workflows/last_version.txt
 
+        echo "========================================"
+        echo "版本号获取完成"
+        echo "========================================"
+
     - name: 登录Docker Hub
       if: steps.check.outputs.has_update == 'true'
       run: |
@@ -151,21 +172,28 @@ jobs:
           exit 1
         fi
 
-    - name: 构建Docker镜像（确保可重复性）
+    - name: 构建Docker镜像（优化版 - 减少镜像大小）
       if: steps.check.outputs.has_update == 'true'
       env:
         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
         VERSION: ${{ steps.version.outputs.version }}
       run: |
-        echo "构建Docker镜像（确保可重复性）..."
+        echo "========================================"
+        echo "开始构建Docker镜像"
+        echo "========================================"
+        echo "版本: $VERSION"
+        echo "镜像标签: ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION}"
 
         # 清理可能存在的旧镜像
         docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest 2>/dev/null || true
         docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} 2>/dev/null || true
 
-        # 构建镜像
+        # 构建镜像（使用--no-cache避免缓存，使用--platform指定架构）
+        echo "构建镜像（使用--no-cache，避免缓存层）..."
         docker build \
+          --no-cache \
+          --platform linux/amd64 \
           --build-arg APP_VERSION=${VERSION} \
           -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest \
           -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} \
@@ -187,7 +215,11 @@ jobs:
         echo "latest镜像Digest: $LATEST_DIGEST"
         echo "版本号镜像Digest: $VERSION_DIGEST"
 
-    - name: 推送Docker镜像（避免重复推送）
+        echo "========================================"
+        echo "镜像构建完成"
+        echo "========================================"
+
+    - name: 推送Docker镜像（避免重复）
       if: steps.check.outputs.has_update == 'true'
       env:
         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -195,7 +227,9 @@ jobs:
         VERSION: ${{ steps.version.outputs.version }}
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       run: |
-        echo "检查镜像是否已存在..."
+        echo "========================================"
+        echo "推送镜像到Docker Hub"
+        echo "========================================"
 
         # 获取本地镜像的Digest
         LOCAL_DIGEST=$(docker inspect ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} --format '{{.Id}}')
@@ -235,9 +269,17 @@ jobs:
           fi
         fi
 
+        echo "========================================"
+        echo "镜像推送完成"
+        echo "========================================"
+
     - name: 创建Git标签（仅新版本）
       if: steps.check.outputs.has_update == 'true' && !contains(steps.version.outputs.version, '-fixed')
       run: |
+        echo "========================================"
+        echo "创建Git标签"
+        echo "========================================"
+
         VERSION_TO_TAG="${{ steps.version.outputs.version }}"
 
         git config --global user.name 'github-actions'
@@ -257,6 +299,10 @@ jobs:
         echo "版本: $VERSION_TO_TAG"
         echo "镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:$VERSION_TO_TAG"
 
+        echo "========================================"
+        echo "Git标签创建完成"
+        echo "========================================"
+
     - name: 清理旧的Docker镜像
       if: steps.check.outputs.has_update == 'true'
       env:
@@ -264,7 +310,9 @@ jobs:
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
       run: |
-        echo "开始清理旧的Docker镜像..."
+        echo "========================================"
+        echo "清理旧的Docker镜像"
+        echo "========================================"
 
         ALL_TAGS=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
           "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags?page_size=100" | \
@@ -294,46 +342,17 @@ jobs:
           echo "✅ 没有需要清理的旧镜像"
         fi
 
-    - name: 清理旧的Docker镜像条目（可选）
-      if: steps.check.outputs.has_update == 'true'
-      env:
-        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
-      run: |
-        echo "清理旧的Docker镜像条目..."
-
-        # 获取所有标签
-        ALL_TAGS=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
-          "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags?page_size=100" | \
-          jq -r '.results[].digest')
-
-        # 获取所有镜像条目
-        ALL_IMAGES=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
-          "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO" | \
-          jq -r '.digest')
-
-        echo "总标签数: $(echo "$ALL_TAGS" | wc -l)"
-        echo "总镜像条目数: $(echo "$ALL_IMAGES" | wc -l)"
-
-        # 找出没有标签的镜像条目
-        for IMAGE_DIGEST in $ALL_IMAGES; do
-          # 检查这个Digest是否有标签指向
-          TAG_COUNT=$(echo "$ALL_TAGS" | grep -c "$IMAGE_DIGEST" || true)
-
-          if [ "$TAG_COUNT" -eq 0 ]; then
-            echo "删除没有标签的镜像条目: $IMAGE_DIGEST"
-            curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
-              -X DELETE \
-              "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/manifests/$IMAGE_DIGEST"
-          fi
-        done
-
-        echo "✅ 旧的镜像条目清理完成"
+        echo "========================================"
+        echo "镜像清理完成"
+        echo "========================================"
 
     - name: 构建完成通知
       if: steps.check.outputs.has_update == 'true'
       run: |
+        echo "========================================"
+        echo "构建完成通知"
+        echo "========================================"
+
         BUILD_TYPE="${{ github.event.inputs.build_type }}"
         if [ -z "$BUILD_TYPE" ]; then
           BUILD_TYPE="定时构建"
@@ -348,7 +367,17 @@ jobs:
         echo ""
         echo "💡 Node.js 版本: 24 (已启用)"
         echo "💡 镜像去重: 已启用"
+        echo "💡 镜像大小优化: 已启用"
+        echo ""
+        echo "💡 使用说明:"
+        echo "1. 最新镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
+        echo "2. 特定版本: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
+        echo "3. 建议使用版本号标签，避免缓存问题"
 
         if [ "$BUILD_TYPE" = "emergency" ]; then
           echo "🚨 紧急构建完成，镜像已更新！"
         fi
+
+        echo "========================================"
+        echo "通知完成"
+        echo "========================================"
