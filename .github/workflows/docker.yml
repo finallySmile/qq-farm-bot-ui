@@ -1,4 +1,4 @@
-name: 自动构建QQ农场机器人UI - 后端优化版（不修改Dockerfile）
+name: 自动构建QQ农场机器人UI - 后端优化版（解决镜像缓存问题）
 
 on:
   schedule:
@@ -151,7 +151,7 @@ jobs:
           exit 1
         fi
 
-    - name: 构建Docker镜像（不修改Dockerfile）
+    - name: 构建Docker镜像
       if: steps.check.outputs.has_update == 'true'
       env:
         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -166,7 +166,7 @@ jobs:
         docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest 2>/dev/null || true
         docker rmi -f ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} 2>/dev/null || true
 
-        # 构建镜像（不使用构建参数）
+        # 构建镜像
         echo "构建镜像..."
         docker build \
           --build-arg APP_VERSION=${VERSION} \
@@ -176,40 +176,20 @@ jobs:
 
         if [ $? -ne 0 ]; then
           echo "❌ Docker构建失败"
-          echo "尝试使用腾讯云镜像源..."
-
-          # 如果构建失败，尝试使用腾讯云镜像源
-          echo "构建镜像（使用腾讯云镜像源）..."
-
-          # 创建一个临时Dockerfile，修改npm registry
-          cp ./core/Dockerfile ./core/Dockerfile.temp
-          sed -i 's|https://registry.npmmirror.com/|https://mirrors.cloud.tencent.com/npm/|g' ./core/Dockerfile.temp
-
-          docker build \
-            --build-arg APP_VERSION=${VERSION} \
-            -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest \
-            -t ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} \
-            -f ./core/Dockerfile.temp .
-
-          # 清理临时文件
-          rm -f ./core/Dockerfile.temp
-
-          if [ $? -ne 0 ]; then
-            echo "❌ Docker构建失败（使用腾讯云镜像源也失败）"
-            exit 1
-          fi
+          exit 1
         fi
 
         echo "✅ Docker构建成功"
         echo "镜像大小:"
         docker images | grep ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}
 
-    - name: 推送Docker镜像
+    - name: 推送Docker镜像并强制刷新缓存
       if: steps.check.outputs.has_update == 'true'
       env:
         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
         VERSION: ${{ steps.version.outputs.version }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       run: |
         echo "推送镜像到Docker Hub..."
 
@@ -219,13 +199,53 @@ jobs:
 
         VERSION_PUSH_RESULT=$?
 
-        # 只有在版本号标签成功推送后，才推送latest标签
+        # 推送latest标签
         if [ $VERSION_PUSH_RESULT -eq 0 ]; then
           echo "推送latest标签..."
           docker push ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest
 
           if [ $? -eq 0 ]; then
-            echo "✅ 镜像推送成功，latest标签已更新"
+            echo "✅ 镜像推送成功"
+
+            # 强制刷新缓存
+            echo "强制刷新Docker Hub缓存..."
+
+            # 删除latest标签（如果存在）
+            echo "删除可能存在的latest标签..."
+            curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+              -X DELETE \
+              "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags/latest" || true
+
+            # 等待删除完成
+            sleep 10
+
+            # 重新推送latest标签
+            echo "重新推送latest标签..."
+            docker pull ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION}
+            docker tag ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:${VERSION} ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest
+            docker push ${DOCKERHUB_USERNAME}/${DOCKERHUB_REPO}:latest
+
+            # 等待缓存清除
+            echo "等待缓存清除（30秒）..."
+            sleep 30
+
+            # 验证
+            echo "验证镜像标签..."
+            LATEST_DIGEST=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+              "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags/latest" | \
+              jq -r '.digest')
+
+            VERSION_DIGEST=$(curl -s -u "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+              "https://hub.docker.com/v2/repositories/$DOCKERHUB_USERNAME/$DOCKERHUB_REPO/tags/${VERSION}" | \
+              jq -r '.digest')
+
+            if [ "$LATEST_DIGEST" = "$VERSION_DIGEST" ]; then
+              echo "✅ 缓存刷新成功，latest标签已更新"
+            else
+              echo "⚠️ 缓存可能仍未刷新，请等待几分钟后重试"
+            fi
+
+            echo "✅ 镜像推送完成，latest标签已刷新"
           else
             echo "❌ latest标签推送失败"
             exit 1
@@ -310,7 +330,12 @@ jobs:
         echo "最新镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
         echo ""
         echo "💡 Node.js 版本: 24 (已启用)"
-        echo "💡 构建策略: 使用Dockerfile原样，如失败则自动切换镜像源"
+        echo "💡 缓存刷新: 已执行"
+        echo ""
+        echo "💡 使用说明:"
+        echo "1. 最新镜像: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest"
+        echo "2. 特定版本: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ steps.version.outputs.version }}"
+        echo "3. 如果latest标签有缓存问题，请使用版本号标签"
 
         if [ "$BUILD_TYPE" = "emergency" ]; then
           echo "🚨 紧急构建完成，镜像已更新！"
